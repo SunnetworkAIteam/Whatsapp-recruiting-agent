@@ -60,7 +60,7 @@ This project is split so most contributors **don't need Docker or a database run
 
 ## Status
 
-🚧 In active development. See GitHub Issues and Milestones for current progress.
+In active development. See GitHub Issues and Milestones for current progress.
 
 ## Credentials & security
 
