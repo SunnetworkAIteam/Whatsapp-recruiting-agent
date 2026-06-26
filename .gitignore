@@ -1,0 +1,25 @@
+# Environment / secrets
+.env
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+venv/
+.venv/
+*.egg-info/
+
+# Databases
+*.db
+*.sqlite3
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Node (if dashboard uses it)
+node_modules/
+
+# Editor/IDE
+.vscode/
+.idea/
