@@ -5,9 +5,14 @@ Run with:
     pytest tests/test_rule_engine.py -v
 """
 
+import sys
+from pathlib import Path
 from datetime import datetime, timedelta
 
 import pytest
+
+# Add the project root to Python's import path
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from agent.rule_engine import (
     RuleAction,
@@ -16,7 +21,6 @@ from agent.rule_engine import (
     check_reply_window,
     gate_message,
 )
-
 
 # ---------------------------------------------------------------------------
 # Opt-out detection
