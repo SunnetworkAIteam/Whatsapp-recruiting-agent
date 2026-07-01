@@ -9,7 +9,7 @@ async def upload_excel(file: UploadFile = File(...)):
         return {"error": "Only .xlsx files allowed"}
     
     df = pd.read_excel(file.file)
-    required_cols = {"name", "number", "role"}
+    required_cols = {"name", "phone", "role"}
     if not required_cols.issubset(df.columns):
         return {"error": "Missing required columns"}
     
