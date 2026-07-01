@@ -1,4 +1,5 @@
+supabase>=1.0.0
 fastapi
 uvicorn
 pandas
-pytest
+openpyxl   # needed for Excel parsing
