@@ -1,7 +1,8 @@
 fastapi
 uvicorn
-pandas
+httpx
 pytest
 openpyxl
-httpx
 supabase
+python-multipart
+pydantic
