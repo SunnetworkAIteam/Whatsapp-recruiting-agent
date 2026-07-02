@@ -2,3 +2,5 @@ fastapi
 uvicorn
 pandas
 pytest
+openpyxl
+supabase
