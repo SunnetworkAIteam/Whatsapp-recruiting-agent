@@ -1,3 +1,4 @@
+import os
 from fastapi import FastAPI, UploadFile, File
 import pandas as pd
 from supabase import create_client
@@ -5,10 +6,11 @@ from app.validation import validate_candidate, normalize_phone, is_duplicate
 
 app = FastAPI()
 
-# Supabase client (replace with your .env values)
-SUPABASE_URL = "https://ljvxxtkbbjskfscchabc.supabase.co"
-SUPABASE_KEY = "sb_secret_vVgq-WpxlPlyza5aekaMVw_kuMIt72K"
+# Supabase client (read from environment variables)
+SUPABASE_URL = os.environ.get("SUPABASE_URL")
+SUPABASE_KEY = os.environ.get("SUPABASE_KEY")
 supabase = create_client(SUPABASE_URL, SUPABASE_KEY)
+
 
 @app.post("/upload-excel")
 async def upload_excel(file: UploadFile = File(...)):
@@ -22,8 +24,7 @@ async def upload_excel(file: UploadFile = File(...)):
         return {"error": f"Could not parse Excel file: {str(e)}"}
 
     required_cols = {"name", "phone", "role"}
-
-    if not required_cols.issubset(df.columns.str.lower()):
+    if not required_cols.issubset(set(df.columns.str.lower())):
         return {"error": "Missing required columns (need name, phone, role)"}
 
     records = df.to_dict(orient="records")
