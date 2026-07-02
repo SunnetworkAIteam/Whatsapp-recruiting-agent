@@ -3,4 +3,5 @@ uvicorn
 pandas
 pytest
 openpyxl
+httpx
 supabase
