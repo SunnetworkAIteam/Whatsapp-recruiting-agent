@@ -3,3 +3,4 @@ uvicorn
 pandas
 pytest
 openpyxl
+httpx
