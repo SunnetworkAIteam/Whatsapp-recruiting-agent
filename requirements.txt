@@ -5,3 +5,9 @@ pytest
 openpyxl
 httpx
 supabase
+celery>=5.3.0
+redis>=5.0.0
+python-multipart
+pydantic
+python-dotenv
+anthropic
