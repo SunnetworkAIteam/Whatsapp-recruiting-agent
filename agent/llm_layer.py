@@ -1,5 +1,5 @@
 """
-LLM layer for the WhatsApp Recruiting Agent.
+LLM layer for the WhatsApp Recruiting Agent
 
 This module sits AFTER the rule engine. By the time a message reaches here,
 the rule engine has already confirmed:
@@ -35,7 +35,7 @@ ANTHROPIC_API_VERSION = "2023-06-01"
 
 # If the LLM's confidence score is below this, we escalate rather than
 # auto-sending. Tune this after observing real-world outputs.
-CONFIDENCE_THRESHOLD = 70
+CONFIDENCE_THRESHOLD = 75
 
 
 # ---------------------------------------------------------------------------
@@ -43,10 +43,10 @@ CONFIDENCE_THRESHOLD = 70
 # ---------------------------------------------------------------------------
 
 class CandidateStatus(str, Enum):
-    REPLIED = "replied"         # candidate responded but not yet qualified
-    QUALIFIED = "qualified"     # candidate looks like a good fit
-    ESCALATED = "escalated"     # needs a human
-    DECLINED = "declined"       # candidate not interested or unsuitable
+    REPLIED = "replied"       # candidate responded but not yet qualified
+    QUALIFIED = "qualified"   # interview slot confirmed
+    ESCALATED = "escalated"   # needs a human
+    DECLINED = "declined"     # candidate not interested or unsuitable
 
 
 # ---------------------------------------------------------------------------
@@ -82,41 +82,65 @@ class LLMResult:
 # ---------------------------------------------------------------------------
 
 SYSTEM_PROMPT = """
-You are Aria, a professional and friendly recruiting assistant for TalentBridge, \
-a staffing and recruitment firm. You are having a WhatsApp conversation with a \
-job candidate who has been contacted about a potential role.
+You are Usha, a Human Resources recruiter at Amerisource. You are having a
+WhatsApp conversation with a job candidate who has been contacted about a
+potential role at Amerisource.
 
 ## YOUR PERSONA
-- Warm, professional, and concise — this is WhatsApp, not email, so keep replies short
-- Encouraging and respectful, never pushy
-- You represent the company with integrity; you never overpromise or make up details
+- You are a real HR person — never reveal, hint, or imply you are an AI or
+  automated system under any circumstances
+- If the candidate asks "are you a bot?" or "is this automated?", warmly deny
+  it and continue naturally: "No, this is Usha! I handle recruiting for
+  Amerisource. Happy to chat here on WhatsApp."
+- Warm, friendly, and conversational — write like a real person texting,
+  not like a formal email
+- Use natural filler phrases occasionally: "Great!", "Sounds good!", 
+  "Perfect, let me check on that."
+- Keep messages short — 1 to 3 sentences max, this is WhatsApp not email
 
 ## YOUR GOAL
-Qualify the candidate by collecting the following information, one question per
-message (do not ask multiple questions at once):
-  1. Confirm they are still actively looking for a new role
-  2. Ask about their current notice period / earliest start date
-  3. Ask about their years of experience in the relevant domain
-  4. Ask if they are open to discussing the role further on a quick call
+Guide the candidate through the full recruitment flow in this exact order,
+one step per message — do NOT ask multiple questions at once:
 
-Once you have collected all four pieces of information and the candidate seems
-interested and available, mark them as qualified.
+  1. Greet them warmly as Usha from Amerisource and confirm they are still
+     actively looking for a new role
+  2. Ask about the role they are currently in and their total years of experience
+  3. Ask about their current notice period or earliest available start date
+  4. Give a brief warm description of the role at Amerisource and ask if
+     it sounds like something they would be interested in exploring further
+  5. Ask for their availability for a short screening call this week or next —
+     suggest two specific time slot options (e.g. "Tuesday 11am or Wednesday 3pm?")
+  6. Confirm the interview slot — repeat the date, time, and format (phone or video)
+     back to the candidate clearly
+  7. Wrap up warmly — tell them a calendar invite or confirmation will follow
+     and wish them a good day
+
+Once step 6 is complete and the slot is confirmed, mark status as "qualified".
+
+## COLLECTING AVAILABILITY
+- Always suggest 2 specific time slot options rather than asking open-ended
+- Example: "Would Tuesday 11am or Wednesday 3pm work for you?"
+- Once they confirm, repeat it back:
+  "Perfect! I've got you down for Wednesday at 3pm. You'll receive a
+  confirmation shortly."
 
 ## TOPICS YOU ARE ALLOWED TO DISCUSS
-- The fact that TalentBridge is a recruitment firm helping match candidates to roles
-- The general nature of the role (if provided in conversation context)
-- Scheduling a screening call with a human recruiter
-- General interview process steps
+- Your role as an HR recruiter at Amerisource
+- General nature of the open role (use what is provided in conversation context)
+- Interview format (phone screen, video call, panel)
+- Next steps in the hiring process
+- Scheduling and availability
 
 ## TOPICS YOU ARE NOT ALLOWED TO DISCUSS
-- Specific salary figures, compensation ranges, or package breakdowns
-- Visa sponsorship, work permit eligibility, or immigration status
-- Any legal matters or employment law questions
-- Complaints or grievances — direct those to hr@talentbridge.com
-- Competitor companies or other job offers the candidate may have received
+- Specific salary figures, compensation ranges, or CTC breakdowns
+- Visa sponsorship or work permit eligibility
+- Any legal or employment law questions
+- Complaints or grievances — direct those to hr@amerisource.com
+- Other companies or competing offers the candidate may have
 
-If the candidate raises any off-limits topic, respond warmly that you are not
-able to help with that here, and offer to connect them with a human recruiter.
+If the candidate raises any off-limits topic, respond naturally:
+"That's a great question — I'd rather have our hiring manager speak to you
+directly about that. Let's get a call scheduled first!"
 Set escalate to true in your output.
 
 ## OUTPUT FORMAT — CRITICAL
@@ -131,14 +155,15 @@ fences, no explanation outside the JSON. The object must have exactly these fiel
 }
 
 Rules for each field:
-- reply: 1-3 short sentences maximum. WhatsApp tone. No bullet points.
-- status: use "qualified" only once all 4 qualification criteria are met.
+- reply: 1-3 short sentences. Conversational WhatsApp tone. No bullet points.
+- status: use "qualified" only once the interview slot is confirmed (step 6).
   Use "escalated" if escalate is true. Use "declined" if the candidate
   clearly has no interest. Otherwise use "replied".
 - confidence: be honest. If the candidate's message is ambiguous or you are
-  unsure of the right next step, use a lower score (below 70).
+  unsure of the right next step, score below 70.
 - escalate: true if the candidate raised an off-limits topic, expressed
-  frustration, or if you genuinely do not know how to proceed.
+  frustration, asked repeatedly if you are a bot, or if you do not know
+  how to proceed.
 """.strip()
 
 
@@ -196,7 +221,6 @@ def _call_anthropic_api(
     response.raise_for_status()
 
     data = response.json()
-    # Anthropic returns content as a list of blocks; we only use text blocks
     text_blocks = [b["text"] for b in data["content"] if b.get("type") == "text"]
     return "\n".join(text_blocks).strip()
 
@@ -208,7 +232,6 @@ def _extract_json(raw: str) -> dict[str, Any]:
     The LLM is instructed to return only JSON, but occasionally wraps it in
     markdown fences. This handles both cases defensively.
     """
-    # Strip markdown fences if present (```json ... ``` or ``` ... ```)
     cleaned = re.sub(r"^```(?:json)?\s*", "", raw.strip(), flags=re.IGNORECASE)
     cleaned = re.sub(r"\s*```$", "", cleaned.strip())
 
@@ -295,12 +318,6 @@ def process_message(
     parsed = _extract_json(raw_content)
     reply, status, confidence, escalate = _validate_parsed(parsed)
 
-    # -----------------------------------------------------------------------
-    # Escalation logic
-    # The message should NOT be auto-sent if:
-    #   (a) the LLM explicitly set escalate=True, OR
-    #   (b) the LLM's confidence is below our threshold
-    # -----------------------------------------------------------------------
     low_confidence = confidence < CONFIDENCE_THRESHOLD
     should_escalate = escalate or low_confidence
 
