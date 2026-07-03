@@ -37,6 +37,8 @@ jobs:
     env:
       DATABASE_URL: postgresql://postgres:localdev@localhost:5432/whatsapp_pipeline
       REDIS_URL: redis://localhost:6379/0
+      SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+      SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
 
     steps:
       - name: Check out code
