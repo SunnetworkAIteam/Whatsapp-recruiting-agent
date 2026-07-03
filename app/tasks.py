@@ -26,7 +26,7 @@ def send_candidate(self, candidate_id: int):
         # Simulate sending (replace with Twilio/email integration later)
         print(f"Sending candidate: {candidate['name']} - {candidate['phone']}")
 
-        supabase.table("candidates").update({"status": "sent"}).eq("id", candidate_id).execute()
+        supabase.table("candidates").update({"status": "messaged"}).eq("id", candidate_id).execute()
         return f"Candidate {candidate_id} sent successfully"
 
     except Exception as exc:

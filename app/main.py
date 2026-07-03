@@ -11,6 +11,7 @@ SUPABASE_URL = os.environ.get("SUPABASE_URL")
 SUPABASE_KEY = os.environ.get("SUPABASE_KEY")
 supabase = create_client(SUPABASE_URL, SUPABASE_KEY)
 
+app = FastAPI()
 
 @app.post("/upload-excel")
 async def upload_excel(file: UploadFile = File(...)):
@@ -48,3 +49,9 @@ async def upload_excel(file: UploadFile = File(...)):
         inserted.append(record)
 
     return {"inserted": inserted, "skipped": skipped}
+    df = pd.read_excel(file.file)
+    required_cols = {"name", "phone", "role"}
+    if not required_cols.issubset(df.columns):
+        return {"error": "Missing required columns"}
+    records = df.to_dict(orient="records")
+    return {"parsed": records}
