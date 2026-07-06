@@ -9,13 +9,12 @@ load_dotenv()
 SUPABASE_URL = os.getenv("SUPABASE_URL")
 SUPABASE_KEY = os.getenv("SUPABASE_KEY")
 
-if not SUPABASE_URL or not SUPABASE_KEY:
-    raise RuntimeError("Supabase URL/Key not set. Check your .env file.")
-
-supabase = create_client(SUPABASE_URL, SUPABASE_KEY)
-
 @celery_app.task(bind=True, max_retries=3)
 def send_candidate(self, candidate_id: int):
+    if not SUPABASE_URL or not SUPABASE_KEY:
+        return f"Supabase not configured"
+
+    supabase = create_client(SUPABASE_URL, SUPABASE_KEY)
     try:
         result = supabase.table("candidates").select("*").eq("id", candidate_id).eq("status", "pending").execute()
         if not result.data:
