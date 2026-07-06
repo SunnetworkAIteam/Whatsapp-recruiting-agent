@@ -12,10 +12,10 @@ if SUPABASE_URL and SUPABASE_KEY:
     except Exception:
         supabase = None
 
-def enqueue_pending_candidates():
-    if supabase is None:
-        raise RuntimeError("Supabase URL/Key not set. Check your .env file (enqueue_pending_candidates).")
-
-    result = supabase.table("candidates").select("id").eq("status", "pending").execute()
-    for row in result.data:
-        send_candidate.delay(row["id"])
+def enqueue_pending_candidates():    
+    # Query pending candidates from Supabase
+    result = supabase.table("candidates").select("*").eq("status", "pending").execute()
+    
+    # Iterate through results and enqueue each candidate
+   # for candidate in result.data:
+    #    send_candidate.delay(candidate["id"])
