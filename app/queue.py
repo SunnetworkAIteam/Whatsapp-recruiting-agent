@@ -13,10 +13,5 @@ def enqueue_pending_candidates():
         return  # Supabase not configured
 
     global supabase
-    if supabase is None:
-        supabase = create_client(SUPABASE_URL, SUPABASE_KEY)
-
     result = supabase.table("candidates").select("id").eq("status", "pending").execute()
-    # defensive: result.data might be None
-    for row in (result.data or []):
-        send_candidate.delay(row["id"])
+   
