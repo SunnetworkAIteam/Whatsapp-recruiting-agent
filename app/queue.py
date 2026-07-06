@@ -4,9 +4,12 @@ import os
 
 SUPABASE_URL = os.environ.get("SUPABASE_URL")
 SUPABASE_KEY = os.environ.get("SUPABASE_KEY")
-supabase = create_client(SUPABASE_URL, SUPABASE_KEY)
 
 def enqueue_pending_candidates():
+    if not SUPABASE_URL or not SUPABASE_KEY:
+        return  # Supabase not configured
+
+    supabase = create_client(SUPABASE_URL, SUPABASE_KEY)
     result = supabase.table("candidates").select("id").eq("status", "pending").execute()
     for row in result.data:
         send_candidate.delay(row["id"])
