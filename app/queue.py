@@ -9,8 +9,10 @@ SUPABASE_KEY = os.environ.get("SUPABASE_KEY")
 supabase = None
 
 def enqueue_pending_candidates():
-    if not SUPABASE_URL or not SUPABASE_KEY:
-        return  # Supabase not configured
+    result = supabase.table("candidates").select("*").eq("status", "pending").execute()
+    
+    for candidate in result.data:
+        send_candidate.delay(candidate["id"])
 
     global supabase
     result = supabase.table("candidates").select("id").eq("status", "pending").execute()
