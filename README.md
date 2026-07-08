@@ -1,69 +1,85 @@
-# WhatsApp Recruiting Agent
+# Candidate Reply Webhook (WhatsApp / Twilio)
 
-An automated candidate outreach pipeline. HR uploads a candidate list, the system sends a WhatsApp first-contact message, and a hybrid rule-based + LLM-powered **WhatsApp agent** handles replies, qualifies candidates, and escalates to a human when needed — all visible live on an HR dashboard.
+Receives inbound candidate WhatsApp replies via Twilio's webhook, with
+idempotency so retried/duplicate deliveries never get processed twice.
 
-## How it works
-
-1. **HR uploads an Excel file** (Name, number, role)
-2. System **parses and validates** with pandas (dedup, phone format checks) and saves candidates to the DB with status `pending`
-3. A rate-limited **queue** sends each candidate a Meta-approved WhatsApp **template message** via Twilio
-4. When a candidate **replies**, a webhook fires and the message passes through:
-   - A **rule engine** first — checking for opt-out (STOP), escalation triggers (salary, visa, complaints), and the 24-hour reply window
-   - If no rule trips, an **LLM layer** generates a reply and a structured status update, including a confidence score
-   - Low-confidence or rule-flagged messages are routed to a human instead of being auto-sent
-5. **HR dashboard** shows the live pipeline: `pending → messaged → replied → qualified → escalated → booked / declined`
-
-## Status flow
+## Structure
 
 ```
-pending → messaged → replied → qualified → booked
-                   ↘ escalated → (human resolves) → booked / declined
-                   ↘ declined (opt-out at any point)
+webhook/
+  app.py          - FastAPI app + POST /webhooks/whatsapp/inbound endpoint
+  schemas.py      - TwilioInboundMessage pydantic model
+  security.py     - Twilio webhook signature verification
+  idempotency.py  - Thread-safe idempotency store (in-memory, TTL-based)
+  orchestrator.py - Handoff point to the agent/ (rule engine + LLM) module
+tests/
+  test_webhook.py - pytest tests for idempotency + signature verification
+requirements.txt
 ```
 
-## WhatsApp constraints this system respects
+## Setup
 
-- **First message must use a Meta-approved template** — free-form text isn't allowed for first contact
-- **Free-form replies only work within a 24-hour window** after the candidate replies; outside that window, a new template message is required
-
-## Tech stack
-
-- **Backend:** Python (FastAPI), pandas
-- **Queue:** Celery / RQ with Redis as broker
-- **Database:** PostgreSQL
-- **Messaging:** Twilio WhatsApp API
-- **LLM:** Anthropic API (Claude)
-- **Dashboard:** _(fill in — React, etc.)_
-
-## Project structure
-
-```
-whatsapp-recruiting-agent/
-├── ingestion/        # Excel upload, parsing, validation, dedup (Person A)
-├── infra/             # DB schema, queue/worker setup (Person A)
-├── agent/             # Rule engine + LLM layer (Person B)
-├── webhook/           # Inbound webhook, idempotency, orchestration (Person C)
-├── dashboard/         # HR live pipeline view (Person C)
-├── tests/
-├── .env.example
-├── CONTRIBUTING.md    # Team workflow — read this first
-└── README.md
+```bash
+pip install -r requirements.txt
 ```
 
-## Getting started
+## Run the tests
 
-This project is split so most contributors **don't need Docker or a database running locally** to write and test their part. See [`CONTRIBUTING.md`](./CONTRIBUTING.md) for:
-- How to set up your environment
-- What you can test on your own laptop vs. what the integration lead tests
-- The `.env.example` config template
-- Function-level contracts between each person's piece
+```bash
+python -m pytest tests/test_webhook.py -v
+```
 
-## Status
+## Run the server
 
-In active development. See GitHub Issues and Milestones for current progress.
+```bash
+python -m uvicorn webhook.app:app --reload
+```
 
-## Credentials & security
+Signature verification is on by default. For local dev without a real
+Twilio-signed URL, disable it via an env var before starting the server:
 
-- Never commit a `.env` file with real values — only `.env.example` with placeholders is tracked in git
-- Twilio and production DB credentials are held by the integration lead only
-- LLM API keys used by contributors are scoped/spend-limited project keys, not personal or production keys
+```bash
+# PowerShell
+$env:TWILIO_VALIDATE_SIGNATURE = "false"
+python -m uvicorn webhook.app:app --reload
+```
+
+```bash
+# bash
+export TWILIO_VALIDATE_SIGNATURE=false
+python -m uvicorn webhook.app:app --reload
+```
+
+## How idempotency works
+
+Twilio includes a unique `MessageSid` on every inbound message and retries
+delivery (resending the same `MessageSid`) if your endpoint is slow or
+returns a non-2xx status. This webhook:
+
+1. Verifies the request came from Twilio (signature check).
+2. Atomically reserves the `MessageSid` in `IdempotencyStore` before doing
+   any real work (`save_if_absent`), so two racing retries can't both slip
+   through.
+3. If the key was already seen, returns immediately without re-running the
+   agent pipeline.
+4. Otherwise hands the parsed message to `orchestrator.process_inbound_message`,
+   which is where Person B's rule-engine/LLM pipeline plugs in via
+   `set_message_processor(...)`.
+
+**Production note:** the store is in-memory, which is fine for a single
+process/tests. Once Celery/RQ workers run as separate processes, back this
+with Redis (`SETNX`) or a Postgres unique constraint on `message_sid`
+instead, so idempotency holds across the whole fleet and survives restarts.
+
+## Integrating the agent module
+
+```python
+# in the app's startup code, once agent/ exists:
+from webhook.orchestrator import set_message_processor
+from agent.pipeline import handle_candidate_reply
+
+set_message_processor(handle_candidate_reply)
+```
+
+`handle_candidate_reply` should accept a `TwilioInboundMessage` and return
+a dict describing the outcome (status update, confidence score, etc).
