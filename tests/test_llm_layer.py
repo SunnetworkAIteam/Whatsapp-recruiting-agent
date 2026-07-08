@@ -1,5 +1,5 @@
 """
-Tests for agent/llm_layer.py
+Tests for agent/llm_layer
 
 The Anthropic API is NEVER called here. Every test uses a mock caller
 injected via the _api_caller parameter so the suite runs fully offline,
@@ -12,8 +12,6 @@ import sys
 from pathlib import Path
 from datetime import datetime, timedelta
 
-import pytest
-
 # Add the project root to Python's import path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 import json
@@ -22,6 +20,7 @@ import pytest
 
 from agent.llm_layer import (
     CONFIDENCE_THRESHOLD,
+    SYSTEM_PROMPT,
     CandidateStatus,
     LLMResult,
     _build_messages,
@@ -36,7 +35,7 @@ from agent.llm_layer import (
 # ---------------------------------------------------------------------------
 
 def make_api_response(
-    reply: str = "Thanks for getting back to us! Are you currently open to new opportunities?",
+    reply: str = "Hi! This is Usha from Amerisource. Are you currently open to new opportunities?",
     status: str = "replied",
     confidence: int = 85,
     escalate: bool = False,
@@ -61,6 +60,48 @@ def mock_caller(response_str: str):
 
 
 # ---------------------------------------------------------------------------
+# System prompt content checks
+# ---------------------------------------------------------------------------
+
+class TestSystemPrompt:
+    def test_persona_is_usha_from_amerisource(self):
+        assert "Usha" in SYSTEM_PROMPT
+        assert "Amerisource" in SYSTEM_PROMPT
+
+    def test_no_ai_disclosure_instruction_present(self):
+        assert "never reveal" in SYSTEM_PROMPT.lower()
+        assert "AI" in SYSTEM_PROMPT or "bot" in SYSTEM_PROMPT.lower()
+
+    def test_bot_denial_script_is_present(self):
+        # Prompt must tell the LLM how to respond if asked "are you a bot?"
+        assert "are you a bot" in SYSTEM_PROMPT.lower()
+
+    def test_seven_step_flow_is_present(self):
+        # All 7 steps should be referenced
+        for step in ["1.", "2.", "3.", "4.", "5.", "6.", "7."]:
+            assert step in SYSTEM_PROMPT
+
+    def test_qualified_only_after_slot_confirmed(self):
+        assert "slot is confirmed" in SYSTEM_PROMPT.lower() or \
+               "step 6" in SYSTEM_PROMPT.lower()
+
+    def test_off_limits_topics_listed(self):
+        for topic in ["salary", "visa", "legal", "complaint"]:
+            assert topic in SYSTEM_PROMPT.lower()
+
+    def test_amerisource_hr_email_in_prompt(self):
+        assert "hr@amerisource.com" in SYSTEM_PROMPT
+
+    def test_json_output_format_specified(self):
+        for field in ["reply", "status", "confidence", "escalate"]:
+            assert field in SYSTEM_PROMPT
+
+    def test_two_slot_suggestion_instruction_present(self):
+        # Usha should suggest two time options, not ask open-ended
+        assert "two" in SYSTEM_PROMPT.lower() or "tuesday" in SYSTEM_PROMPT.lower()
+
+
+# ---------------------------------------------------------------------------
 # _build_messages
 # ---------------------------------------------------------------------------
 
@@ -72,7 +113,7 @@ class TestBuildMessages:
     def test_history_is_prepended_before_new_message(self):
         history = [
             {"role": "user", "content": "Hello"},
-            {"role": "assistant", "content": "Hi there!"},
+            {"role": "assistant", "content": "Hi! This is Usha from Amerisource."},
         ]
         messages = _build_messages("What's next?", conversation_history=history)
         assert len(messages) == 3
@@ -104,7 +145,7 @@ class TestExtractJson:
 
     def test_raises_on_invalid_json(self):
         with pytest.raises(ValueError, match="LLM did not return valid JSON"):
-            _extract_json("This is just plain text, not JSON.")
+            _extract_json("Sure thing, let me help you with that!")
 
     def test_raises_on_empty_string(self):
         with pytest.raises(ValueError):
@@ -117,14 +158,19 @@ class TestExtractJson:
 
 class TestValidateParsed:
     def _valid(self, **overrides):
-        base = {"reply": "Let's chat!", "status": "replied", "confidence": 80, "escalate": False}
+        base = {
+            "reply": "Great! What role are you currently in?",
+            "status": "replied",
+            "confidence": 85,
+            "escalate": False,
+        }
         return {**base, **overrides}
 
     def test_valid_data_returns_correct_tuple(self):
         reply, status, confidence, escalate = _validate_parsed(self._valid())
-        assert reply == "Let's chat!"
+        assert reply == "Great! What role are you currently in?"
         assert status == CandidateStatus.REPLIED
-        assert confidence == 80
+        assert confidence == 85
         assert escalate is False
 
     def test_all_valid_statuses_parse(self):
@@ -155,51 +201,121 @@ class TestValidateParsed:
 
 
 # ---------------------------------------------------------------------------
-# process_message — happy path
+# process_message — recruitment flow (happy path)
 # ---------------------------------------------------------------------------
 
-class TestProcessMessageHappyPath:
-    def test_returns_llm_result_on_valid_response(self):
-        result = process_message(
-            "Yes, I am looking!",
-            _api_caller=mock_caller(make_api_response()),
-        )
-        assert isinstance(result, LLMResult)
+class TestRecruitmentFlow:
+    """
+    Simulates the 7-step Usha recruitment flow using mocked LLM responses.
+    Each test represents one stage of the conversation.
+    """
 
-    def test_high_confidence_not_escalated(self):
+    def test_step1_initial_greeting_replied(self):
+        """Usha greets and asks if candidate is looking."""
         result = process_message(
-            "Yes, I'm interested.",
-            _api_caller=mock_caller(make_api_response(confidence=90)),
+            "Hi, who is this?",
+            _api_caller=mock_caller(make_api_response(
+                reply="Hi! This is Usha from Amerisource. Are you currently open to new opportunities?",
+                status="replied",
+                confidence=88,
+            )),
         )
-        assert result.escalated is False
         assert result.status == CandidateStatus.REPLIED
+        assert result.escalated is False
 
-    def test_reply_text_is_passed_through(self):
+    def test_step2_current_role_and_experience(self):
+        """Usha asks about current role and years of experience."""
         result = process_message(
-            "Sure, tell me more.",
-            _api_caller=mock_caller(
-                make_api_response(reply="Great! What is your notice period?")
-            ),
+            "Yes I'm looking!",
+            _api_caller=mock_caller(make_api_response(
+                reply="Great! Could you tell me about your current role and how many years of experience you have?",
+                status="replied",
+                confidence=90,
+            )),
         )
-        assert result.reply == "Great! What is your notice period?"
+        assert result.status == CandidateStatus.REPLIED
+        assert result.escalated is False
 
-    def test_qualified_status_passed_through_when_confident(self):
+    def test_step3_notice_period(self):
+        """Usha asks about notice period after getting experience info."""
         result = process_message(
-            "I can start in 2 weeks and have 5 years experience.",
-            _api_caller=mock_caller(
-                make_api_response(status="qualified", confidence=88)
-            ),
+            "I'm a software engineer with 5 years experience.",
+            _api_caller=mock_caller(make_api_response(
+                reply="That's great experience! What's your current notice period or earliest start date?",
+                status="replied",
+                confidence=87,
+            )),
+        )
+        assert result.status == CandidateStatus.REPLIED
+        assert result.escalated is False
+
+    def test_step4_role_description(self):
+        """Usha describes the role and checks interest."""
+        result = process_message(
+            "I can join in 30 days.",
+            _api_caller=mock_caller(make_api_response(
+                reply="Perfect! We have a Senior Engineer role at Amerisource focused on healthcare data platforms. Does that sound interesting to you?",
+                status="replied",
+                confidence=86,
+            )),
+        )
+        assert result.status == CandidateStatus.REPLIED
+        assert result.escalated is False
+
+    def test_step5_availability_with_two_slot_options(self):
+        """Usha suggests two specific time slots."""
+        result = process_message(
+            "Yes, that sounds interesting!",
+            _api_caller=mock_caller(make_api_response(
+                reply="Would Tuesday at 11am or Wednesday at 3pm work for a quick screening call?",
+                status="replied",
+                confidence=91,
+            )),
+        )
+        assert result.status == CandidateStatus.REPLIED
+        assert result.escalated is False
+
+    def test_step6_slot_confirmed_marks_qualified(self):
+        """Once slot is confirmed, status becomes qualified."""
+        result = process_message(
+            "Wednesday 3pm works for me!",
+            _api_caller=mock_caller(make_api_response(
+                reply="Perfect! I've got you down for Wednesday at 3pm. You'll receive a confirmation shortly.",
+                status="qualified",
+                confidence=95,
+            )),
         )
         assert result.status == CandidateStatus.QUALIFIED
         assert result.escalated is False
 
-    def test_raw_content_is_stored(self):
-        raw = make_api_response()
-        result = process_message("Hi!", _api_caller=mock_caller(raw))
-        assert result.raw_content == raw
+    def test_step7_wrap_up_still_qualified(self):
+        """Final wrap-up message keeps status as qualified."""
+        result = process_message(
+            "Great, thank you!",
+            _api_caller=mock_caller(make_api_response(
+                reply="Looking forward to speaking with you! Have a great day. 😊",
+                status="qualified",
+                confidence=93,
+            )),
+        )
+        assert result.status == CandidateStatus.QUALIFIED
+        assert result.escalated is False
 
-    def test_conversation_history_is_forwarded(self):
-        """Verify history is included in the messages passed to the caller."""
+    def test_candidate_declines(self):
+        """Candidate shows no interest — should be marked declined."""
+        result = process_message(
+            "I'm not interested, please don't contact me again.",
+            _api_caller=mock_caller(make_api_response(
+                reply="Completely understood! I'll make a note of that. Wishing you all the best.",
+                status="declined",
+                confidence=92,
+            )),
+        )
+        assert result.status == CandidateStatus.DECLINED
+        assert result.escalated is False
+
+    def test_conversation_history_carried_through(self):
+        """Full conversation history is passed to the LLM caller."""
         captured = {}
 
         def capturing_caller(messages, api_key=None):
@@ -207,79 +323,101 @@ class TestProcessMessageHappyPath:
             return make_api_response()
 
         history = [
-            {"role": "user", "content": "Hello"},
-            {"role": "assistant", "content": "Hi there!"},
+            {"role": "user", "content": "Hi"},
+            {"role": "assistant", "content": '{"reply": "Hi! This is Usha.", "status": "replied", "confidence": 88, "escalate": false}'},
+            {"role": "user", "content": "Yes I am looking"},
+            {"role": "assistant", "content": '{"reply": "Great! What is your current role?", "status": "replied", "confidence": 87, "escalate": false}'},
         ]
-        process_message("Next question?", conversation_history=history, _api_caller=capturing_caller)
+        process_message(
+            "I am a data engineer with 4 years experience.",
+            conversation_history=history,
+            _api_caller=capturing_caller,
+        )
 
-        # history + new user turn = 3 messages
-        assert len(captured["messages"]) == 3
-        assert captured["messages"][-1]["content"] == "Next question?"
+        assert len(captured["messages"]) == 5  # 4 history + 1 new
+        assert captured["messages"][-1]["content"] == "I am a data engineer with 4 years experience."
 
 
 # ---------------------------------------------------------------------------
-# process_message — escalation logic
+# process_message — escalation scenarios
 # ---------------------------------------------------------------------------
 
-class TestProcessMessageEscalation:
-    def test_low_confidence_triggers_escalation(self):
-        low = CONFIDENCE_THRESHOLD - 1
+class TestEscalationScenarios:
+    def test_bot_question_triggers_escalation(self):
+        """Candidate asks if they're talking to a bot."""
         result = process_message(
-            "Not sure what I'm looking for right now...",
-            _api_caller=mock_caller(make_api_response(confidence=low)),
+            "Wait, am I talking to a bot right now?",
+            _api_caller=mock_caller(make_api_response(
+                reply="No, this is Usha! I handle recruiting for Amerisource. Happy to chat here on WhatsApp.",
+                escalate=True,
+                confidence=72,
+            )),
         )
         assert result.escalated is True
         assert result.status == CandidateStatus.ESCALATED
 
-    def test_confidence_exactly_at_threshold_is_not_escalated(self):
+    def test_salary_question_triggers_escalation(self):
+        """Candidate asks about salary — off-limits topic."""
         result = process_message(
-            "Yes, I am interested.",
+            "What's the salary range for this role?",
+            _api_caller=mock_caller(make_api_response(
+                reply="That's a great question — I'd rather have our hiring manager speak to you directly about that. Let's get a call scheduled first!",
+                escalate=True,
+                confidence=88,
+            )),
+        )
+        assert result.escalated is True
+        assert result.status == CandidateStatus.ESCALATED
+
+    def test_visa_question_triggers_escalation(self):
+        """Candidate asks about visa sponsorship — off-limits topic."""
+        result = process_message(
+            "Do you offer visa sponsorship?",
+            _api_caller=mock_caller(make_api_response(
+                reply="That's a great question — I'd rather have our hiring manager speak to you directly about that. Let's get a call scheduled first!",
+                escalate=True,
+                confidence=85,
+            )),
+        )
+        assert result.escalated is True
+        assert result.status == CandidateStatus.ESCALATED
+
+    def test_low_confidence_triggers_escalation(self):
+        """Ambiguous message leads to low confidence — routes to human."""
+        low = CONFIDENCE_THRESHOLD - 1
+        result = process_message(
+            "Maybe... I don't know, it depends on a lot of things.",
+            _api_caller=mock_caller(make_api_response(
+                confidence=low,
+                escalate=False,
+            )),
+        )
+        assert result.escalated is True
+        assert result.status == CandidateStatus.ESCALATED
+
+    def test_confidence_at_threshold_is_not_escalated(self):
+        result = process_message(
+            "Yes, I'm interested.",
             _api_caller=mock_caller(make_api_response(confidence=CONFIDENCE_THRESHOLD)),
         )
         assert result.escalated is False
 
-    def test_escalate_true_triggers_escalation_regardless_of_confidence(self):
+    def test_escalated_draft_reply_preserved_for_human(self):
+        """Even when escalated, reply is kept so the human reviewer can see it."""
         result = process_message(
-            "What's the salary and visa situation?",
-            _api_caller=mock_caller(
-                make_api_response(escalate=True, confidence=90)
-            ),
+            "I want to know the exact salary before I proceed.",
+            _api_caller=mock_caller(make_api_response(
+                reply="That's a great question — I'd rather have our hiring manager speak to you directly about that.",
+                escalate=True,
+            )),
         )
         assert result.escalated is True
-        assert result.status == CandidateStatus.ESCALATED
+        assert len(result.reply) > 0
 
-    def test_both_low_confidence_and_escalate_true(self):
-        low = CONFIDENCE_THRESHOLD - 10
-        result = process_message(
-            "Confused candidate message",
-            _api_caller=mock_caller(
-                make_api_response(escalate=True, confidence=low)
-            ),
-        )
-        assert result.escalated is True
-        assert result.status == CandidateStatus.ESCALATED
-
-    def test_escalated_reply_is_preserved_for_human_reviewer(self):
-        """
-        Even when escalated, reply should NOT be lost — a human needs
-        to see what the LLM was going to say.
-        """
-        result = process_message(
-            "I want to discuss the salary details.",
-            _api_caller=mock_caller(
-                make_api_response(
-                    reply="I'm afraid I can't discuss salary here.",
-                    escalate=True,
-                )
-            ),
-        )
-        assert result.escalated is True
-        assert "salary" in result.reply.lower() or len(result.reply) > 0
-
-    def test_escalated_result_has_reason(self):
+    def test_escalated_result_includes_reason(self):
         low = CONFIDENCE_THRESHOLD - 5
         result = process_message(
-            "Hmm I don't know",
+            "Hmm not sure",
             _api_caller=mock_caller(make_api_response(confidence=low)),
         )
         assert isinstance(result.reason, str)
@@ -290,21 +428,20 @@ class TestProcessMessageEscalation:
 # process_message — error handling
 # ---------------------------------------------------------------------------
 
-class TestProcessMessageErrorHandling:
-    def test_raises_on_invalid_json_from_api(self):
+class TestErrorHandling:
+    def test_raises_on_plain_text_response(self):
         with pytest.raises(ValueError, match="LLM did not return valid JSON"):
             process_message(
                 "Hi!",
-                _api_caller=mock_caller("Sorry, I can't help with that."),
+                _api_caller=mock_caller("Sure, happy to help!"),
             )
 
-    def test_raises_on_missing_json_fields(self):
-        incomplete = json.dumps({"reply": "Hi", "status": "replied"})
+    def test_raises_on_missing_fields(self):
+        incomplete = json.dumps({"reply": "Hi Usha here!", "status": "replied"})
         with pytest.raises(ValueError, match="missing required fields"):
             process_message("Hi!", _api_caller=mock_caller(incomplete))
 
     def test_raises_when_no_api_key_and_no_mock(self):
-        """Without a mock or an env var, the real caller should raise."""
         import os
         original = os.environ.pop("ANTHROPIC_API_KEY", None)
         try:
@@ -314,8 +451,12 @@ class TestProcessMessageErrorHandling:
             if original is not None:
                 os.environ["ANTHROPIC_API_KEY"] = original
 
-    def test_handles_markdown_fenced_json_from_llm(self):
-        """LLM occasionally wraps output in ```json fences; we handle it."""
+    def test_handles_markdown_fenced_json(self):
         fenced = f"```json\n{make_api_response()}\n```"
         result = process_message("Hi!", _api_caller=mock_caller(fenced))
         assert result.status == CandidateStatus.REPLIED
+
+    def test_raw_content_always_stored(self):
+        raw = make_api_response()
+        result = process_message("Hi!", _api_caller=mock_caller(raw))
+        assert result.raw_content == raw
