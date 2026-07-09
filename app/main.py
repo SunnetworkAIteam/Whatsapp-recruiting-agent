@@ -6,6 +6,11 @@ from app.validation import validate_candidate, normalize_phone, is_duplicate
 
 app = FastAPI()
 
+@app.on_event("startup")
+def startup():
+    from webhook.orchestrator import set_message_processor
+    from agent.pipeline import handle_candidate_reply
+    set_message_processor(handle_candidate_reply)
 # Supabase client (read from environment variables)
 SUPABASE_URL = os.environ.get("SUPABASE_URL")
 SUPABASE_KEY = os.environ.get("SUPABASE_KEY")
