@@ -57,3 +57,4 @@ async def upload_excel(file: UploadFile = File(...)):
         return {"error": "Missing required columns"}
     records = df.to_dict(orient="records")
     return {"parsed": records}
+
