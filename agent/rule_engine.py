@@ -55,11 +55,10 @@ OPT_OUT_KEYWORDS = [
     "don't contact",
 ]
 
+# NOTE: salary/compensation-related terms ("salary", "compensation", "ctc",
+# "pay range") were intentionally removed from this list -- these are now
+# handled by the LLM layer instead of being force-escalated to a human.
 ESCALATION_KEYWORDS = [
-    "salary",
-    "compensation",
-    "ctc",
-    "pay range",
     "visa",
     "sponsorship",
     "work permit",
@@ -102,7 +101,7 @@ def check_opt_out(message: str) -> Optional[RuleResult]:
 def check_escalation(message: str) -> Optional[RuleResult]:
     """
     Returns a RuleResult if the message contains a sensitive topic that
-    should always go to a human (salary, visa, complaints, etc.), else None.
+    should always go to a human (visa, complaints, etc.), else None.
     """
     normalized = _normalize(message)
     for keyword in ESCALATION_KEYWORDS:

@@ -72,17 +72,16 @@ def test_check_opt_out_ignores_non_opt_out_messages(message):
 @pytest.mark.parametrize(
     "message",
     [
-        "What is the salary range for this role?",
-        "Do you offer visa sponsorship?",
-        "I need a work permit to take this job",
-        "I'd like to file a complaint about how this was handled",
+        "I need visa sponsorship for this role",
+        "Will you sponsor a work permit?",
+        "I want to file a complaint",
+        "My lawyer will be in touch",
         "I'm considering legal action",
         "This feels discriminatory",
-        "I was harassed during the interview",
-        "What's the CTC for this position?",
+        "I was harassed by my previous manager",
     ],
 )
-def test_check_escalation_detects_sensitive_topics(message):
+def test_check_escalation_matches(message):
     result = check_escalation(message)
     assert result is not None
     assert result.action == RuleAction.ESCALATE_TO_HUMAN
@@ -91,14 +90,22 @@ def test_check_escalation_detects_sensitive_topics(message):
 @pytest.mark.parametrize(
     "message",
     [
-        "I'm interested, when can we schedule a call?",
-        "Sure, I'm available tomorrow at 3pm",
-        "What does the role involve day to day?",
+        "What's the salary for this position?",
+        "Can you share the compensation details?",
+        "What is the CTC being offered?",
+        "What's the pay range for this role?",
     ],
 )
-def test_check_escalation_ignores_normal_messages(message):
-    result = check_escalation(message)
-    assert result is None
+def test_check_escalation_no_longer_matches_salary_terms(message):
+    """
+    Salary/compensation-related keywords were removed from
+    ESCALATION_KEYWORDS -- these should now pass through (no escalation).
+    """
+    assert check_escalation(message) is None
+
+
+def test_check_escalation_no_match_generic():
+    assert check_escalation("Looking forward to the interview") is None
 
 
 # ---------------------------------------------------------------------------
@@ -162,12 +169,29 @@ def test_gate_message_escalation_blocks_even_within_window():
     now = datetime(2026, 6, 30, 12, 0, 0)
     last_message = now - timedelta(hours=2)
     result = gate_message(
-        "What's the salary for this role?",
+        "I need visa sponsorship for this role",
         last_candidate_message_at=last_message,
         now=now,
     )
     assert result.action == RuleAction.ESCALATE_TO_HUMAN
     assert result.passed is False
+
+
+def test_gate_message_salary_no_longer_escalates_within_window():
+    """
+    Salary/compensation terms were removed from ESCALATION_KEYWORDS, so
+    a clean salary question within an open reply window should now pass
+    through to the LLM instead of being escalated.
+    """
+    now = datetime(2026, 6, 30, 12, 0, 0)
+    last_message = now - timedelta(hours=2)
+    result = gate_message(
+        "What's the salary for this role?",
+        last_candidate_message_at=last_message,
+        now=now,
+    )
+    assert result.action == RuleAction.PASS_TO_LLM
+    assert result.passed is True
 
 
 def test_gate_message_expired_window_requires_template_even_for_clean_message():

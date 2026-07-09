@@ -90,7 +90,7 @@ class TestSystemPrompt:
             assert topic in SYSTEM_PROMPT.lower()
 
     def test_amerisource_hr_email_in_prompt(self):
-        assert "hr@amerisource.com" in SYSTEM_PROMPT
+        assert "hr@amerisource.in" in SYSTEM_PROMPT
 
     def test_json_output_format_specified(self):
         for field in ["reply", "status", "confidence", "escalate"]:
