@@ -17,14 +17,18 @@ if SUPABASE_URL and SUPABASE_KEY:
         supabase = None
 
 VALID_STATUSES = [
-    "pending", "messaged", "replied", "qualified",
+    "pending", "messaged", "follow_up_sent", "final_reminder_sent",
+    "awaiting_interview", "replied", "qualified",
     "escalated", "booked", "declined"
 ]
 
 ALLOWED_TRANSITIONS = {
     "pending": ["messaged", "declined"],
-    "messaged": ["replied", "declined"],
-    "replied": ["qualified", "escalated", "declined"],
+    "messaged": ["follow_up_sent", "replied", "declined"],
+    "follow_up_sent": ["final_reminder_sent", "replied", "declined"],
+    "final_reminder_sent": ["replied", "declined"],
+    "replied": ["qualified", "escalated", "awaiting_interview", "declined"],
+    "awaiting_interview": ["booked", "qualified", "escalated", "declined"],
     "qualified": ["booked", "declined"],
     "escalated": ["booked", "declined"],
     "booked": [],       # final state
