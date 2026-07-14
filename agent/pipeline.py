@@ -10,38 +10,51 @@ set_message_processor() is wired up to via:
 
 (see README.md, "Integrating the agent module")
 
-Flow: webhook receives a reply -> rule_engine.gate_message() -> if it
-passes, llm_layer.process_message() -> transition_status() records the
-outcome in Supabase -> reply is sent back out (or logged, until Twilio
-sending is wired up).
-
-If gate_message() does NOT return PASS_TO_LLM, this stops immediately:
-no LLM call, no outbound send.
+Flow: webhook receives a reply -> build candidate snapshot state -> record inbound timestamp 
+      -> rule_engine.gate_message() -> Route based on action (BLOCK_OPT_OUT, ESCALATE_TO_HUMAN, 
+         NO_ACTION, SEND_TEMPLATE, or PASS_TO_LLM) -> Record outcome/metadata in Supabase.
 """
 
 from __future__ import annotations
 
 import logging
+import os
+from datetime import datetime, timezone
 from typing import Optional
 
-from agent.llm_layer import process_message
-from agent.rule_engine import RuleAction, gate_message
-from app.status import get_candidate_by_phone, record_inbound_message, transition_status
+from agent.llm_layer import CandidateStatus, process_message
+from agent.rule_engine import CandidateState, RuleAction, TemplateType, gate_message
+
+# Import webhook schema
 from webhook.schemas import TwilioInboundMessage
+
+# Database operations and status utility functions
+from app.status import (
+    get_candidate_by_phone, 
+    record_inbound_message, 
+    transition_status,
+    update_candidate_metadata  # Assumed implemented in app/status.py to handle metadata fields
+)
+
+# Messaging layers and specific messaging exceptions
+from messaging import (
+    send_template_message, 
+    send_text_message,  # Assumed exported from messaging.py (formerly send_free_form_message)
+    MessagingConfigError,
+    MessageSendError
+)
 
 logger = logging.getLogger("agent.pipeline")
 
-
-def _send_reply(to_number: str, body: str) -> None:
-    """
-    Send the reply back to the candidate over WhatsApp.
-
-    Twilio's REST API call isn't wired up yet (that's Sanjan's part per the
-    original spec), so for now this just logs what would be sent. Swap the
-    body of this function for a real Twilio client call once that's ready;
-    callers don't need to change.
-    """
-    logger.info("Would send WhatsApp reply to %s: %s", to_number, body)
+# ---------------------------------------------------------------------------
+# Template Type to Twilio Content SID Mapping
+# ---------------------------------------------------------------------------
+TEMPLATE_SID_MAPPING = {
+    TemplateType.JOB_OUTREACH: os.environ.get("TWILIO_JOB_OUTREACH_TEMPLATE_SID"),
+    TemplateType.NO_REPLY: os.environ.get("TWILIO_NO_REPLY_TEMPLATE_SID"),
+    TemplateType.FINAL_REMINDER: os.environ.get("TWILIO_FINAL_REMINDER_TEMPLATE_SID"),
+    TemplateType.INTERVIEW_FOLLOW_UP: os.environ.get("TWILIO_INTERVIEW_FOLLOW_UP_TEMPLATE_SID"),
+}
 
 
 def handle_candidate_reply(message: TwilioInboundMessage) -> dict:
@@ -54,10 +67,6 @@ def handle_candidate_reply(message: TwilioInboundMessage) -> dict:
     candidate = get_candidate_by_phone(message.from_number)
 
     if candidate is None:
-        # No matching candidate record -- nothing to transition, nothing
-        # safe to auto-reply to. Log and stop; this shouldn't happen in
-        # practice since candidates are only messaged after being uploaded
-        # via /upload-excel, but guard against it rather than crashing.
         logger.warning(
             "No candidate found for phone=%s (sid=%s); dropping message.",
             message.from_number,
@@ -71,66 +80,203 @@ def handle_candidate_reply(message: TwilioInboundMessage) -> dict:
         }
 
     candidate_id = candidate["id"]
-    last_candidate_message_at = candidate.get("last_candidate_message_at")
+    phone_number = message.from_number
 
-    # Step 2: run the deterministic rule engine before anything else.
-    rule_result = gate_message(message.body, last_candidate_message_at)
+    # ---------------------------------------------------------------------------
+    # Timing Guardrail: Construct state snapshot BEFORE updating inbound timestamp
+    # ---------------------------------------------------------------------------
+    state = CandidateState(
+        first_outreach_sent_at=candidate.get("first_outreach_sent_at"),
+        last_candidate_message_at=candidate.get("last_candidate_message_at"),
+        last_template_sent_at=candidate.get("last_template_sent_at"),
+        interview_scheduled=candidate.get("interview_scheduled", False),
+        no_reply_template_sent=candidate.get("no_reply_template_sent", False),
+        final_reminder_sent=candidate.get("final_reminder_sent", False)
+    )
 
+    # Now safe to record the inbound message event in the database
+    record_inbound_message(candidate_id)
+
+    # Run the deterministic rule engine
+    rule_result = gate_message(message.body, candidate_state=state)
+
+    # ---------------------------------------------------------------------------
+    # Action: BLOCK_OPT_OUT
+    # ---------------------------------------------------------------------------
     if rule_result.action == RuleAction.BLOCK_OPT_OUT:
-        transition_status(candidate_id, "declined")
+        logger.info(
+            "Candidate %s (%s) requested opt-out. Action: %s. Reason: %s", 
+            candidate_id, phone_number, rule_result.action.value, rule_result.reason
+        )
+        transition_status(candidate_id, CandidateStatus.DECLINED.value)
         return {
             "escalated": False,
-            "status": "declined",
+            "status": CandidateStatus.DECLINED.value,
             "reply": None,
             "reason": rule_result.reason,
         }
 
+    # ---------------------------------------------------------------------------
+    # Action: ESCALATE_TO_HUMAN
+    # ---------------------------------------------------------------------------
     if rule_result.action == RuleAction.ESCALATE_TO_HUMAN:
-        transition_status(candidate_id, "escalated")
+        logger.info(
+            "Candidate %s (%s) triggered sensitive topic escalation. Action: %s. Reason: %s", 
+            candidate_id, phone_number, rule_result.action.value, rule_result.reason
+        )
+        transition_status(candidate_id, CandidateStatus.ESCALATED.value)
         return {
             "escalated": True,
-            "status": "escalated",
+            "status": CandidateStatus.ESCALATED.value,
             "reply": None,
             "reason": rule_result.reason,
         }
 
-    if rule_result.action == RuleAction.SEND_TEMPLATE:
-        # 24h window expired. Twilio template sending isn't wired up yet
-        # (Sanjan's part) -- log it and leave the candidate's status as-is
-        # rather than guessing a new one.
+    # ---------------------------------------------------------------------------
+    # Action: NO_ACTION
+    # ---------------------------------------------------------------------------
+    if rule_result.action == RuleAction.NO_ACTION:
         logger.info(
-            "Reply window expired for candidate_id=%s; template send required: %s",
-            candidate_id,
-            rule_result.reason,
+            "No automated action required for candidate %s (%s). Action: %s. Reason: %s", 
+            candidate_id, phone_number, rule_result.action.value, rule_result.reason
         )
         return {
             "escalated": False,
-            "status": candidate.get("status", "replied"),
+            "status": candidate.get("status", CandidateStatus.REPLIED.value),
             "reply": None,
             "reason": rule_result.reason,
         }
 
-    # rule_result.action == RuleAction.PASS_TO_LLM: continue to the LLM layer.
-    record_inbound_message(candidate_id)
+    # ---------------------------------------------------------------------------
+    # Action: SEND_TEMPLATE
+    # ---------------------------------------------------------------------------
+    if rule_result.action == RuleAction.SEND_TEMPLATE:
+        template_type = rule_result.template_type
+        if not template_type:
+            logger.error("Rule Engine returned SEND_TEMPLATE but no template_type was provided for candidate %s", candidate_id)
+            return {
+                "escalated": False,
+                "status": candidate.get("status", CandidateStatus.REPLIED.value),
+                "reply": None,
+                "reason": "Error: Template action triggered but no template type provided.",
+            }
 
+        content_sid = TEMPLATE_SID_MAPPING.get(template_type)
+        
+        # Validate Template SID configuration boundary before hitting the messaging framework
+        if not content_sid:
+            logger.error("No Template SID configured for template type '%s'.", template_type.value)
+            return {
+                "escalated": False,
+                "status": candidate.get("status", CandidateStatus.REPLIED.value),
+                "reply": None,
+                "reason": f"Missing Template SID for {template_type.value}.",
+            }
+
+        logger.info(
+            "Preparing template send. Candidate ID: %s. Phone: %s. Action: %s. Type: %s. Content SID: %s. Reason: %s",
+            candidate_id, phone_number, rule_result.action.value, template_type.value, content_sid, rule_result.reason
+        )
+
+        try:
+            # send_template_message parameter using exact keyword argument mapping
+            twilio_sid = send_template_message(to=phone_number, template_sid=content_sid)
+            logger.info("Successfully sent template. Candidate ID: %s. Type: %s. Twilio Message SID: %s", candidate_id, template_type.value, twilio_sid)
+        except (MessagingConfigError, MessageSendError) as exc:
+            logger.error("Twilio operational error for candidate %s while sending template: %s", candidate_id, exc, exc_info=True)
+            return {
+                "escalated": False,
+                "status": candidate.get("status", CandidateStatus.REPLIED.value),
+                "reply": None,
+                "reason": f"Messaging error encountered while sending template: {exc}",
+            }
+
+        # Operational status and metadata roadmap tracking (safely using option B for string tracking variables)
+        now_ts = datetime.now(timezone.utc)
+        meta_updates = {"last_template_sent_at": now_ts}
+        
+        if template_type == TemplateType.JOB_OUTREACH:
+            meta_updates["first_outreach_sent_at"] = now_ts
+            next_status = "messaged"
+        elif template_type == TemplateType.NO_REPLY:
+            meta_updates["no_reply_template_sent"] = True
+            next_status = "follow_up_sent"
+        elif template_type == TemplateType.FINAL_REMINDER:
+            meta_updates["final_reminder_sent"] = True
+            next_status = "final_reminder_sent"
+        elif template_type == TemplateType.INTERVIEW_FOLLOW_UP:
+            next_status = "awaiting_interview"
+        else:
+            next_status = CandidateStatus.REPLIED.value
+
+        # Sync states safely through separate transition and explicit metadata updates
+        transition_status(candidate_id, next_status)
+        update_candidate_metadata(candidate_id, meta_updates)
+
+        return {
+            "escalated": False,
+            "status": next_status,
+            "reply": None,
+            "reason": f"Template {template_type.value} dispatched successfully. {rule_result.reason}",
+            "twilio_message_sid": twilio_sid,
+        }
+
+    # ---------------------------------------------------------------------------
+    # Action: PASS_TO_LLM
+    # ---------------------------------------------------------------------------
     conversation_history: Optional[list[dict[str, str]]] = candidate.get("conversation_history")
-    result = process_message(message.body, conversation_history)
+
+    # Safe parsing of the current database status into the CandidateStatus validation barrier
+    raw_status = candidate.get("status")
+    current_status = None
+    if raw_status:
+        try:
+            current_status = CandidateStatus(raw_status.lower())
+        except ValueError:
+            pass
+
+    # Call conversational AI generation layer
+    result = process_message(
+        candidate_message=message.body,
+        conversation_history=conversation_history,
+        current_status=current_status
+    )
 
     if result.escalated:
-        transition_status(candidate_id, "escalated")
+        logger.info(
+            "LLM layer flagged escalation. Candidate ID: %s. Phone: %s. Reason: %s", 
+            candidate_id, phone_number, result.reason
+        )
+        transition_status(candidate_id, CandidateStatus.ESCALATED.value)
         return {
             "escalated": True,
-            "status": "escalated",
+            "status": CandidateStatus.ESCALATED.value,
             "reply": None,
             "reason": result.reason,
         }
 
+    logger.info("Preparing text reply. Candidate ID: %s. Phone: %s. Intended Status: %s", candidate_id, phone_number, result.status.value)
+    
+    try:
+        # send_text_message parameter mapping
+        twilio_sid = send_text_message(to=phone_number, body=result.reply)
+        logger.info("Successfully sent text response. Candidate ID: %s. Twilio Message SID: %s", candidate_id, twilio_sid)
+    except (MessagingConfigError, MessageSendError) as exc:
+        logger.error("Twilio operational error for candidate %s while sending conversational text: %s", candidate_id, exc, exc_info=True)
+        return {
+            "escalated": False,
+            "status": candidate.get("status", CandidateStatus.REPLIED.value),
+            "reply": None,
+            "reason": f"Messaging error encountered while sending conversational text: {exc}",
+        }
+
+    # Complete state transition
     transition_status(candidate_id, result.status.value)
-    _send_reply(message.from_number, result.reply)
 
     return {
         "escalated": result.escalated,
         "status": result.status.value,
         "reply": result.reply,
         "reason": result.reason,
+        "twilio_message_sid": twilio_sid,
     }
