@@ -1,6 +1,11 @@
 # Environment / secrets
 .env
 
+# Google service account credentials
+app/credentials/
+*.googleusercontent.com.json
+google_service_account*.json
+
 # Python
 __pycache__/
 *.pyc
