@@ -11,3 +11,4 @@ python-multipart
 pydantic
 python-dotenv
 anthropic
+twilio
