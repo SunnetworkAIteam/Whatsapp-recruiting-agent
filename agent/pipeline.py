@@ -355,8 +355,18 @@ def handle_candidate_reply(message: TwilioInboundMessage) -> dict:
     updated_history.append({"role": "assistant", "content": result.reply})
     update_candidate_metadata(candidate_id, {"conversation_history": updated_history})
 
-    # Complete state transition
-    transition_status(candidate_id, result.status.value)
+    # Complete state transition. Disallowed transitions (e.g. a
+    # "declined" candidate keeps chatting and the LLM classifies the
+    # reply as "replied") are caught here rather than crashing the whole
+    # webhook request -- the candidate's status simply stays as-is, and
+    # this is logged for visibility.
+    try:
+        transition_status(candidate_id, result.status.value)
+    except ValueError as exc:
+        logger.warning(
+            "Skipped status transition for candidate %s: %s",
+            candidate_id, exc,
+        )
 
     return {
         "escalated": result.escalated,
