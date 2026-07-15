@@ -46,6 +46,20 @@ from agent.send_functions import (
 
 logger = logging.getLogger("agent.pipeline")
 
+
+def _parse_ts(value):
+    """
+    Parse a Supabase-returned timestamp into an aware datetime.
+    Supabase always returns timestamptz columns as ISO strings, not
+    datetime objects -- but CandidateState/rule_engine.py's hours_since()
+    needs real datetimes to do `now - past_time` arithmetic.
+    """
+    if not value:
+        return None
+    if isinstance(value, datetime):
+        return value if value.tzinfo else value.replace(tzinfo=timezone.utc)
+    return datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+
 # ---------------------------------------------------------------------------
 # Template Type to Twilio Content SID Mapping
 # ---------------------------------------------------------------------------
@@ -55,6 +69,56 @@ TEMPLATE_SID_MAPPING = {
     TemplateType.FINAL_REMINDER: os.environ.get("TWILIO_FINAL_REMINDER_TEMPLATE_SID"),
     TemplateType.INTERVIEW_FOLLOW_UP: os.environ.get("TWILIO_INTERVIEW_FOLLOW_UP_TEMPLATE_SID"),
 }
+
+# ---------------------------------------------------------------------------
+# Role -> work arrangement details, used to fill the JOB_OUTREACH template's
+# {{3}} (work type) and {{4}} (shift/hours) placeholders.
+#
+# TODO: values below are placeholders (TBD) pending confirmation from HR.
+# Fill in the real work_type ("Remote" / "Onsite" / "Hybrid") and hours for
+# each role before sending real outreach. Sheet/role names must match
+# exactly what comes from Google Sheets ingestion (see app/google_sheets.py
+# -- each sheet name becomes the candidate's `role`).
+# ---------------------------------------------------------------------------
+ROLE_WORK_DETAILS = {
+    "NOC": {"work_type": "TBD", "hours": "TBD"},
+    "AI": {"work_type": "TBD", "hours": "TBD"},
+    "SOC": {"work_type": "TBD", "hours": "TBD"},
+}
+
+# Used for any role not found in ROLE_WORK_DETAILS above, so an unmapped
+# role doesn't send blank/broken template variables.
+DEFAULT_WORK_DETAILS = {"work_type": "TBD", "hours": "TBD"}
+
+
+def _build_job_outreach_variables(candidate: dict) -> dict:
+    """
+    Build the {{1}}-{{4}} content_variables for the JOB_OUTREACH template:
+        {{1}} = candidate name
+        {{2}} = role
+        {{3}} = work type (Remote/Onsite/Hybrid)
+        {{4}} = shift/working hours
+
+    Falls back to DEFAULT_WORK_DETAILS (currently "TBD") for any role not
+    yet configured in ROLE_WORK_DETAILS -- logs a warning so this doesn't
+    silently ship "TBD" to a real candidate without visibility.
+    """
+    role = candidate.get("role") or ""
+    details = ROLE_WORK_DETAILS.get(role)
+    if details is None:
+        logger.warning(
+            "No ROLE_WORK_DETAILS configured for role '%s'; using placeholder "
+            "values. Fill this in once HR confirms the work arrangement.",
+            role,
+        )
+        details = DEFAULT_WORK_DETAILS
+
+    return {
+        "1": candidate.get("name") or "there",
+        "2": role or "this role",
+        "3": details["work_type"],
+        "4": details["hours"],
+    }
 
 
 def handle_candidate_reply(message: TwilioInboundMessage) -> dict:
@@ -86,9 +150,9 @@ def handle_candidate_reply(message: TwilioInboundMessage) -> dict:
     # Timing Guardrail: Construct state snapshot BEFORE updating inbound timestamp
     # ---------------------------------------------------------------------------
     state = CandidateState(
-        first_outreach_sent_at=candidate.get("first_outreach_sent_at"),
-        last_candidate_message_at=candidate.get("last_candidate_message_at"),
-        last_template_sent_at=candidate.get("last_template_sent_at"),
+        first_outreach_sent_at=_parse_ts(candidate.get("first_outreach_sent_at")),
+        last_candidate_message_at=_parse_ts(candidate.get("last_candidate_message_at")),
+        last_template_sent_at=_parse_ts(candidate.get("last_template_sent_at")),
         interview_scheduled=candidate.get("interview_scheduled", False),
         no_reply_template_sent=candidate.get("no_reply_template_sent", False),
         final_reminder_sent=candidate.get("final_reminder_sent", False)
@@ -173,14 +237,25 @@ def handle_candidate_reply(message: TwilioInboundMessage) -> dict:
                 "reason": f"Missing Template SID for {template_type.value}.",
             }
 
+        # Build template variables. Currently only JOB_OUTREACH has known
+        # placeholders ({{1}} name, {{2}} role, {{3}} work type, {{4}} hours).
+        # Other template types send with no variables until their content
+        # is confirmed to need any.
+        template_variables = None
+        if template_type == TemplateType.JOB_OUTREACH:
+            template_variables = _build_job_outreach_variables(candidate)
+
         logger.info(
             "Preparing template send. Candidate ID: %s. Phone: %s. Action: %s. Type: %s. Content SID: %s. Reason: %s",
             candidate_id, phone_number, rule_result.action.value, template_type.value, content_sid, rule_result.reason
         )
 
         try:
-            # send_template_message parameter using exact keyword argument mapping
-            twilio_sid = send_template_message(to=phone_number, template_sid=content_sid)
+            twilio_sid = send_template_message(
+                to=phone_number,
+                template_sid=content_sid,
+                template_variables=template_variables,
+            )
             logger.info("Successfully sent template. Candidate ID: %s. Type: %s. Twilio Message SID: %s", candidate_id, template_type.value, twilio_sid)
         except (MessagingConfigError, MessageSendError) as exc:
             logger.error("Twilio operational error for candidate %s while sending template: %s", candidate_id, exc, exc_info=True)

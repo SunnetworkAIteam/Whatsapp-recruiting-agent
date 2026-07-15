@@ -45,6 +45,10 @@ def transition_status(candidate_id: int, new_status: str):
     if not hasattr(result, "data") or not result.data:
         raise ValueError(f"Candidate {candidate_id} not found")
     current_status = result.data[0]["status"]
+
+    if new_status == current_status:
+        return f"Candidate {candidate_id} already in status {current_status}; no transition needed"
+
     if new_status not in ALLOWED_TRANSITIONS.get(current_status, []):
         raise ValueError(f"Cannot transition from {current_status} to {new_status}")
     supabase.table("candidates").update({"status": new_status}).eq("id", candidate_id).execute()

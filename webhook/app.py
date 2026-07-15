@@ -39,6 +39,21 @@ logger = logging.getLogger("webhook")
 
 app = FastAPI(title="WhatsApp Candidate Reply Webhook")
 
+
+@app.on_event("startup")
+def _register_agent_pipeline():
+    """
+    Wire the real rule-engine/LLM pipeline into the orchestrator.
+    Needed here because this module can run standalone
+    (uvicorn webhook.app:app), in which case app/main.py's own startup
+    hook never runs and the orchestrator silently falls back to
+    _default_processor, which does nothing.
+    """
+    from .orchestrator import set_message_processor
+    from agent.pipeline import handle_candidate_reply
+    set_message_processor(handle_candidate_reply)
+    logger.info("Registered agent.pipeline.handle_candidate_reply as the message processor.")
+
 # 24h TTL: comfortably covers Twilio's retry window. Replace with a
 # Redis-backed store for production / multi-worker deployments.
 idempotency_store = IdempotencyStore(ttl_seconds=24 * 60 * 60)
