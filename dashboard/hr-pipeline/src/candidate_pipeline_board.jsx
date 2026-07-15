@@ -1,106 +1,39 @@
 import { useState, useEffect, useRef, useCallback } from "react";
 import Papa from "papaparse";
+import { supabase } from "./supabaseClient";
 
 // ---------------------------------------------------------------------------
 // STATUS CONFIG
-// This is the single source of truth for columns. Add/remove a status here
-// and the board, the mock generator, and the simulator all pick it up.
+// This is the single source of truth for columns. Must stay in sync with
+// app/status.py's VALID_STATUSES on the backend -- if a status exists there
+// but not here, candidates in that status fall back to "Pending" below via
+// normalizeStatus(), which will look wrong on the board even though the DB
+// data is correct.
 // ---------------------------------------------------------------------------
 const STATUSES = [
-  { key: "pending",   label: "Pending",   dot: "bg-slate-400",   border: "border-slate-300",  chip: "bg-slate-100 text-slate-700" },
-  { key: "messaged",  label: "Messaged",  dot: "bg-blue-400",    border: "border-blue-300",   chip: "bg-blue-50 text-blue-700" },
-  { key: "replied",   label: "Replied",   dot: "bg-cyan-400",    border: "border-cyan-300",   chip: "bg-cyan-50 text-cyan-700" },
-  { key: "qualified", label: "Qualified", dot: "bg-violet-400",  border: "border-violet-300", chip: "bg-violet-50 text-violet-700" },
-  { key: "escalated", label: "Escalated", dot: "bg-amber-400",   border: "border-amber-300",  chip: "bg-amber-50 text-amber-700" },
-  { key: "booked",    label: "Booked",    dot: "bg-emerald-400", border: "border-emerald-300",chip: "bg-emerald-50 text-emerald-700" },
-  { key: "declined",  label: "Declined",  dot: "bg-rose-400",    border: "border-rose-300",   chip: "bg-rose-50 text-rose-700" },
+  { key: "pending",              label: "Pending",              dot: "bg-slate-400",   border: "border-slate-300",  chip: "bg-slate-100 text-slate-700" },
+  { key: "messaged",             label: "Messaged",             dot: "bg-blue-400",    border: "border-blue-300",   chip: "bg-blue-50 text-blue-700" },
+  { key: "follow_up_sent",       label: "Follow-up sent",       dot: "bg-indigo-400",  border: "border-indigo-300", chip: "bg-indigo-50 text-indigo-700" },
+  { key: "final_reminder_sent",  label: "Final reminder sent",  dot: "bg-fuchsia-400", border: "border-fuchsia-300",chip: "bg-fuchsia-50 text-fuchsia-700" },
+  { key: "replied",              label: "Replied",              dot: "bg-cyan-400",    border: "border-cyan-300",   chip: "bg-cyan-50 text-cyan-700" },
+  { key: "awaiting_interview",   label: "Awaiting interview",   dot: "bg-teal-400",    border: "border-teal-300",   chip: "bg-teal-50 text-teal-700" },
+  { key: "qualified",            label: "Qualified",            dot: "bg-violet-400",  border: "border-violet-300", chip: "bg-violet-50 text-violet-700" },
+  { key: "escalated",            label: "Escalated",            dot: "bg-amber-400",   border: "border-amber-300",  chip: "bg-amber-50 text-amber-700" },
+  { key: "booked",               label: "Booked",               dot: "bg-emerald-400", border: "border-emerald-300",chip: "bg-emerald-50 text-emerald-700" },
+  { key: "declined",             label: "Declined",             dot: "bg-rose-400",    border: "border-rose-300",   chip: "bg-rose-50 text-rose-700" },
 ];
 
 const STATUS_KEYS = STATUSES.map((s) => s.key);
 
-// Roughly plausible forward transitions, used only by the mock simulator
-// so demo movement looks like a real pipeline instead of random noise.
-const NEXT_STATUS = {
-  pending: ["messaged"],
-  messaged: ["replied", "escalated"],
-  replied: ["qualified", "escalated", "declined"],
-  qualified: ["booked", "escalated", "declined"],
-  escalated: ["qualified", "declined"],
-  booked: [],
-  declined: [],
-};
-
-// ---------------------------------------------------------------------------
-// MOCK DATA
-// Stand-in for the real `candidates` table. Shape mirrors what the Supabase
-// query below expects, so swapping the data source later is a one-line change.
-// ---------------------------------------------------------------------------
-const FIRST_NAMES = ["Priya", "Daniel", "Amara", "Liu", "Sofia", "Ravi", "Elena", "Jamal", "Noor", "Marcus", "Yuki", "Fatima", "Owen", "Aisha", "Leo", "Ingrid", "Tariq", "Maya", "Sven", "Chidi"];
-const LAST_NAMES = ["Menon", "Cole", "Nwosu", "Zhang", "Reyes", "Patel", "Petrova", "Khan", "Ahmed", "Reilly", "Tanaka", "Haddad", "Brennan", "Bello", "Fischer", "Larsen", "Siddiqui", "Ortiz", "Berg", "Okafor"];
-const ROLES = ["Frontend Engineer", "Recruiting Coordinator", "Data Analyst", "Product Designer", "Support Specialist", "Sales Development Rep", "Operations Manager", "Backend Engineer"];
-const SOURCES = ["LinkedIn", "Referral", "Careers page", "Indeed", "Sourced"];
-
-// Short mock job descriptions per role, keyed by role name so every candidate
-// applying to that role shows the same JD (mirrors a real jobs table join).
-const JOB_DESCRIPTIONS = {
-  "Frontend Engineer": "Build and maintain customer-facing UI in React and TypeScript. 3+ years experience, strong CSS fundamentals, comfortable owning features end to end.",
-  "Recruiting Coordinator": "Own scheduling and candidate communication across the hiring pipeline. Excellent written communication, high attention to detail, ATS experience a plus.",
-  "Data Analyst": "Turn raw product and business data into clear, actionable reporting. SQL fluency required, dashboarding experience (Looker/Metabase/Tableau) preferred.",
-  "Product Designer": "Design end-to-end product experiences from wireframe to shipped UI. Portfolio required, Figma fluency, comfortable partnering directly with engineering.",
-  "Support Specialist": "Front-line customer support across chat and email. Calm under pressure, strong writing, prior SaaS support experience preferred.",
-  "Sales Development Rep": "Generate and qualify pipeline for the sales team through outbound prospecting. Resilient, coachable, comfortable with daily outreach targets.",
-  "Operations Manager": "Own internal process and vendor management as the company scales. Highly organized, comfortable with ambiguity, prior startup ops experience preferred.",
-  "Backend Engineer": "Design and maintain core API and data infrastructure. Strong in Node or Python, experience with Postgres at scale, on-call rotation participation.",
-};
-
-const NOTE_SNIPPETS = [
-  "Strong communicator, followed up same day.",
-  "Referred by an existing employee — good signal.",
-  "Took a while to respond initially, then engaged quickly.",
-  "Asked sharp questions about the role during outreach.",
-  "Portfolio/resume stood out immediately.",
-  "Salary expectations seem well aligned with band.",
-  "Currently interviewing elsewhere — may move fast.",
-];
-
-function seededCandidates(count = 24) {
-  const out = [];
-  for (let i = 0; i < count; i++) {
-    const first = FIRST_NAMES[i % FIRST_NAMES.length];
-    const last = LAST_NAMES[(i * 3 + 1) % LAST_NAMES.length];
-    const role = ROLES[i % ROLES.length];
-    // Weight the distribution so early stages have more people, like a real funnel
-    const weights = [5, 4, 4, 3, 1, 2, 2];
-    const total = weights.reduce((a, b) => a + b, 0);
-    let r = (i * 37 + 11) % total;
-    let idx = 0;
-    for (; idx < weights.length; idx++) {
-      if (r < weights[idx]) break;
-      r -= weights[idx];
-    }
-    const slug = `${first}.${last}`.toLowerCase();
-    out.push({
-      id: `cand_${i + 1}`,
-      name: `${first} ${last}`,
-      role,
-      source: SOURCES[i % SOURCES.length],
-      status: STATUS_KEYS[idx],
-      last_activity_at: new Date(Date.now() - (i * 1000 * 60 * 47 + 60000)).toISOString(),
-      email: `${slug}@example.com`,
-      phone: `+1 (555) ${String(100 + i).padStart(3, "0")}-${String((i * 7 + 13) % 10000).padStart(4, "0")}`,
-      resume_url: `https://files.example.com/resumes/${slug}.pdf`,
-      job_description: JOB_DESCRIPTIONS[role],
-      notes: NOTE_SNIPPETS[i % NOTE_SNIPPETS.length],
-    });
-  }
-  return out;
-}
+const SOURCES_FALLBACK = ["LinkedIn", "Referral", "Careers page", "Indeed", "Sourced"];
 
 function initials(name) {
+  if (!name) return "?";
   return name.split(" ").map((p) => p[0]).slice(0, 2).join("").toUpperCase();
 }
 
 function timeAgo(iso) {
+  if (!iso) return "—";
   const diffMs = Date.now() - new Date(iso).getTime();
   const mins = Math.floor(diffMs / 60000);
   if (mins < 1) return "just now";
@@ -116,84 +49,138 @@ function normalizeStatus(raw) {
   return STATUS_KEYS.includes(s) ? s : "pending";
 }
 
-// ---------------------------------------------------------------------------
-// DATA LAYER
-// usePipelineData() is the only thing the UI talks to. Right now it runs
-// entirely on mock data plus a simulated interval to fake real-time movement.
-// It also exposes addCandidates(), used by the manual entry table and the
-// CSV importer, so newly added people show up immediately across every view.
-//
-// Swapping to Supabase later means replacing the body of this hook — the
-// return shape stays the same, so the board component below never has to
-// change. See the SUPABASE INTEGRATION notes at the bottom of this file.
-// ---------------------------------------------------------------------------
-function usePipelineData({ simulate = true } = {}) {
-  const [candidates, setCandidates] = useState(() => seededCandidates());
-  const [lastSyncedAt, setLastSyncedAt] = useState(() => new Date());
-  const [connection, setConnection] = useState("connected"); // 'connected' | 'syncing' | 'offline'
-  const [justMoved, setJustMoved] = useState(null);
-  const tickRef = useRef(0);
-  const nextIdRef = useRef(1000);
+// Maps a raw Supabase `candidates` row into the shape this component's UI
+// expects. Centralizing this here means if the DB schema changes, only
+// this function needs updating.
+function mapRow(row) {
+  return {
+    id: row.id,
+    name: row.name || "Unknown",
+    role: row.role || "—",
+    source: row.source || "Sourced",
+    status: normalizeStatus(row.status),
+    last_activity_at: row.updated_at || row.created_at,
+    email: row.email || "",
+    phone: row.phone || "",
+    location: row.location || "",
+    current_company: row.current_company || "",
+    college_name: row.college_name || "",
+    hiring_recruiter_name: row.hiring_recruiter_name || "",
+    remarks: row.remarks || "",
+    interview_score: row.interview_score,
+    communication: row.communication,
+    overall_feedback: row.overall_feedback || "",
+    final_status: row.final_status || "",
+  };
+}
 
-  const refresh = useCallback(() => {
+// Reverse-maps a UI row (from the manual entry table / CSV import) back
+// into columns the `candidates` table actually has, for inserts.
+function mapRowForInsert(row) {
+  return {
+    name: row.name?.trim(),
+    email: row.email?.trim() || null,
+    phone: row.phone?.trim() || null,
+    role: row.role?.trim() || null,
+    source: row.source?.trim() || "Sourced",
+    status: normalizeStatus(row.status),
+    remarks: row.notes?.trim() || null,
+  };
+}
+
+// ---------------------------------------------------------------------------
+// DATA LAYER -- wired to real Supabase data (candidates table), with
+// Realtime subscription so the board updates live as the backend pipeline
+// (webhook -> rule engine -> LLM -> status update) changes candidate rows.
+// ---------------------------------------------------------------------------
+function usePipelineData() {
+  const [candidates, setCandidates] = useState([]);
+  const [lastSyncedAt, setLastSyncedAt] = useState(new Date());
+  const [connection, setConnection] = useState("syncing"); // 'connected' | 'syncing' | 'offline'
+  const [justMoved, setJustMoved] = useState(null);
+  const prevStatusRef = useRef({});
+
+  const fetchAll = useCallback(async () => {
     setConnection("syncing");
-    window.setTimeout(() => {
-      setLastSyncedAt(new Date());
-      setConnection("connected");
-    }, 350);
+    const { data, error } = await supabase
+      .from("candidates")
+      .select("*")
+      .order("updated_at", { ascending: false });
+
+    if (error) {
+      // eslint-disable-next-line no-console
+      console.error("Failed to fetch candidates:", error);
+      setConnection("offline");
+      return;
+    }
+
+    setCandidates(data.map(mapRow));
+    setLastSyncedAt(new Date());
+    setConnection("connected");
   }, []);
 
-  const addCandidates = useCallback((partials) => {
+  const addCandidates = useCallback(async (partials) => {
     const list = Array.isArray(partials) ? partials : [partials];
-    const now = new Date().toISOString();
-    const created = list
+    const rows = list
       .filter((p) => p && p.name && p.name.trim())
-      .map((p) => {
-        nextIdRef.current += 1;
-        const role = p.role && p.role.trim() ? p.role.trim() : ROLES[0];
-        return {
-          id: `cand_manual_${nextIdRef.current}`,
-          name: p.name.trim(),
-          role,
-          source: p.source && p.source.trim() ? p.source.trim() : "Sourced",
-          status: normalizeStatus(p.status),
-          last_activity_at: now,
-          email: p.email?.trim() || "",
-          phone: p.phone?.trim() || "",
-          resume_url: p.resume_url?.trim() || "",
-          job_description: p.job_description?.trim() || JOB_DESCRIPTIONS[role] || "",
-          notes: p.notes?.trim() || "",
-        };
-      });
-    if (created.length > 0) {
-      setCandidates((prev) => [...prev, ...created]);
-      setLastSyncedAt(new Date());
+      .map(mapRowForInsert);
+
+    if (rows.length === 0) return 0;
+
+    const { data, error } = await supabase.from("candidates").insert(rows).select();
+    if (error) {
+      // eslint-disable-next-line no-console
+      console.error("Failed to insert candidates:", error);
+      return 0;
     }
-    return created.length;
+
+    setCandidates((prev) => [...prev, ...data.map(mapRow)]);
+    setLastSyncedAt(new Date());
+    return data.length;
   }, []);
 
   useEffect(() => {
-    if (!simulate) return;
-    const interval = setInterval(() => {
-      tickRef.current += 1;
-      setCandidates((prev) => {
-        const movable = prev.filter((c) => (NEXT_STATUS[c.status] || []).length > 0);
-        if (movable.length === 0) return prev;
-        const target = movable[Math.floor(Math.random() * movable.length)];
-        const options = NEXT_STATUS[target.status];
-        const nextStatus = options[Math.floor(Math.random() * options.length)];
-        setJustMoved(target.id);
-        window.setTimeout(() => setJustMoved((cur) => (cur === target.id ? null : cur)), 1600);
-        return prev.map((c) =>
-          c.id === target.id ? { ...c, status: nextStatus, last_activity_at: new Date().toISOString() } : c
-        );
-      });
-      setLastSyncedAt(new Date());
-    }, 4500);
-    return () => clearInterval(interval);
-  }, [simulate]);
+    fetchAll();
 
-  return { candidates, connection, lastSyncedAt, refresh, justMoved, addCandidates };
+    // Realtime: reflect backend-driven status changes (rule engine, LLM
+    // layer, follow-up scheduler) as they happen, without polling.
+    const channel = supabase
+      .channel("candidates-changes")
+      .on(
+        "postgres_changes",
+        { event: "*", schema: "public", table: "candidates" },
+        (payload) => {
+          if (payload.eventType === "DELETE") {
+            setCandidates((prev) => prev.filter((c) => c.id !== payload.old.id));
+            return;
+          }
+          const mapped = mapRow(payload.new);
+          setCandidates((prev) => {
+            const prevStatus = prevStatusRef.current[mapped.id];
+            if (prevStatus && prevStatus !== mapped.status) {
+              setJustMoved(mapped.id);
+              window.setTimeout(
+                () => setJustMoved((cur) => (cur === mapped.id ? null : cur)),
+                1600
+              );
+            }
+            prevStatusRef.current[mapped.id] = mapped.status;
+            const next = prev.filter((c) => c.id !== mapped.id);
+            return [...next, mapped];
+          });
+          setLastSyncedAt(new Date());
+        }
+      )
+      .subscribe((status) => {
+        setConnection(status === "SUBSCRIBED" ? "connected" : "syncing");
+      });
+
+    return () => {
+      supabase.removeChannel(channel);
+    };
+  }, [fetchAll]);
+
+  return { candidates, connection, lastSyncedAt, refresh: fetchAll, justMoved, addCandidates };
 }
 
 // ---------------------------------------------------------------------------
@@ -226,7 +213,7 @@ function ConnectionBadge({ connection, lastSyncedAt }) {
 }
 
 function CandidateCard({ candidate, highlighted, onOpen }) {
-  const status = STATUSES.find((s) => s.key === candidate.status);
+  const status = STATUSES.find((s) => s.key === candidate.status) || STATUSES[0];
   return (
     <button
       type="button"
@@ -280,7 +267,7 @@ function Column({ status, candidates, justMoved, onOpenCandidate }) {
 
 function CandidateDetailModal({ candidate, onClose }) {
   if (!candidate) return null;
-  const status = STATUSES.find((s) => s.key === candidate.status);
+  const status = STATUSES.find((s) => s.key === candidate.status) || STATUSES[0];
 
   return (
     <div
@@ -325,34 +312,42 @@ function CandidateDetailModal({ candidate, onClose }) {
             <dd className="text-right text-gray-700">{candidate.phone || "—"}</dd>
           </div>
           <div className="flex justify-between gap-4">
-            <dt className="text-gray-400">Resume</dt>
-            <dd className="text-right">
-              {candidate.resume_url ? (
-                <a
-                  href={candidate.resume_url}
-                  target="_blank"
-                  rel="noreferrer"
-                  className="text-blue-600 hover:underline"
-                  onClick={(e) => e.stopPropagation()}
-                >
-                  View resume
-                </a>
-              ) : (
-                <span className="text-gray-400">—</span>
-              )}
-            </dd>
+            <dt className="text-gray-400">Location</dt>
+            <dd className="text-right text-gray-700">{candidate.location || "—"}</dd>
           </div>
+          <div className="flex justify-between gap-4">
+            <dt className="text-gray-400">Current company</dt>
+            <dd className="text-right text-gray-700">{candidate.current_company || "—"}</dd>
+          </div>
+          <div className="flex justify-between gap-4">
+            <dt className="text-gray-400">College</dt>
+            <dd className="text-right text-gray-700">{candidate.college_name || "—"}</dd>
+          </div>
+          <div className="flex justify-between gap-4">
+            <dt className="text-gray-400">Recruiter</dt>
+            <dd className="text-right text-gray-700">{candidate.hiring_recruiter_name || "—"}</dd>
+          </div>
+          {candidate.interview_score != null && (
+            <div className="flex justify-between gap-4">
+              <dt className="text-gray-400">Interview score</dt>
+              <dd className="text-right text-gray-700">{candidate.interview_score}</dd>
+            </div>
+          )}
         </dl>
 
-        <div className="mt-5">
-          <div className="text-xs font-medium uppercase tracking-wide text-gray-400">Job description</div>
-          <p className="mt-1 text-sm leading-relaxed text-gray-600">{candidate.job_description || "—"}</p>
-        </div>
+        {candidate.remarks && (
+          <div className="mt-5">
+            <div className="text-xs font-medium uppercase tracking-wide text-gray-400">Remarks</div>
+            <p className="mt-1 text-sm leading-relaxed text-gray-600">{candidate.remarks}</p>
+          </div>
+        )}
 
-        <div className="mt-5">
-          <div className="text-xs font-medium uppercase tracking-wide text-gray-400">Recruiter notes</div>
-          <p className="mt-1 text-sm leading-relaxed text-gray-600">{candidate.notes || "—"}</p>
-        </div>
+        {candidate.overall_feedback && (
+          <div className="mt-5">
+            <div className="text-xs font-medium uppercase tracking-wide text-gray-400">Overall feedback</div>
+            <p className="mt-1 text-sm leading-relaxed text-gray-600">{candidate.overall_feedback}</p>
+          </div>
+        )}
       </div>
     </div>
   );
@@ -384,8 +379,6 @@ function PipelineBoardView({ candidates, justMoved, onOpenCandidate }) {
 
 // ---------------------------------------------------------------------------
 // BY ROLE VIEW
-// Groups candidates by job role so HR can see, per open req: how many
-// candidates are at each stage, and where the funnel is thinning out.
 // ---------------------------------------------------------------------------
 function RoleSummaryCard({ role, candidates, onOpenCandidate }) {
   const total = candidates.length;
@@ -415,7 +408,7 @@ function RoleSummaryCard({ role, candidates, onOpenCandidate }) {
       <div className="mt-3 flex h-2 w-full overflow-hidden rounded-full bg-gray-100">
         {STATUSES.map((status) => {
           const count = candidates.filter((c) => c.status === status.key).length;
-          if (count === 0) return null;
+          if (count === 0 || total === 0) return null;
           const pct = (count / total) * 100;
           return (
             <div
@@ -470,12 +463,9 @@ function RoleSummaryView({ candidates, onOpenCandidate }) {
 
 // ---------------------------------------------------------------------------
 // ADD CANDIDATES VIEW
-// A spreadsheet-style entry table (fill in rows, add them in bulk) plus a
-// CSV import so HR can paste in a sheet exported from wherever they're
-// currently tracking candidates. Both paths funnel into addCandidates().
 // ---------------------------------------------------------------------------
 function blankRow() {
-  return { name: "", email: "", phone: "", role: ROLES[0], source: SOURCES[0], status: "pending", resume_url: "", notes: "" };
+  return { name: "", email: "", phone: "", role: "", source: SOURCES_FALLBACK[0], status: "pending", notes: "" };
 }
 
 function AddCandidatesView({ addCandidates }) {
@@ -490,8 +480,8 @@ function AddCandidatesView({ addCandidates }) {
   const addRow = () => setRows((prev) => [...prev, blankRow()]);
   const removeRow = (idx) => setRows((prev) => (prev.length > 1 ? prev.filter((_, i) => i !== idx) : prev));
 
-  const submitRows = () => {
-    const count = addCandidates(rows);
+  const submitRows = async () => {
+    const count = await addCandidates(rows);
     setMessage(count > 0 ? `Added ${count} candidate${count === 1 ? "" : "s"} to the pipeline.` : "Add at least a name to each row before submitting.");
     if (count > 0) setRows([blankRow()]);
   };
@@ -502,7 +492,7 @@ function AddCandidatesView({ addCandidates }) {
     Papa.parse(file, {
       header: true,
       skipEmptyLines: true,
-      complete: (results) => {
+      complete: async (results) => {
         const mapped = results.data.map((r) => ({
           name: r.name || r.Name,
           email: r.email || r.Email,
@@ -510,10 +500,9 @@ function AddCandidatesView({ addCandidates }) {
           role: r.role || r.Role,
           source: r.source || r.Source,
           status: r.status || r.Status,
-          resume_url: r.resume_url || r.resume || r.Resume,
           notes: r.notes || r.Notes,
         }));
-        const count = addCandidates(mapped);
+        const count = await addCandidates(mapped);
         setMessage(`Imported ${count} candidate${count === 1 ? "" : "s"} from CSV.`);
       },
       error: () => setMessage("Couldn't read that CSV — check the file and try again."),
@@ -527,7 +516,7 @@ function AddCandidatesView({ addCandidates }) {
         <div>
           <div className="text-sm font-medium text-gray-700">Import from a spreadsheet</div>
           <div className="text-xs text-gray-500">
-            CSV columns: name, email, phone, role, source, status, resume_url, notes
+            CSV columns: name, email, phone, role, source, status, notes
           </div>
         </div>
         <label className="cursor-pointer rounded-md border border-gray-300 bg-white px-3 py-1.5 text-sm font-medium text-gray-700 hover:bg-gray-50">
@@ -546,7 +535,6 @@ function AddCandidatesView({ addCandidates }) {
               <th className="px-3 py-2">Role</th>
               <th className="px-3 py-2">Source</th>
               <th className="px-3 py-2">Status</th>
-              <th className="px-3 py-2">Resume URL</th>
               <th className="px-3 py-2">Notes</th>
               <th className="px-3 py-2"></th>
             </tr>
@@ -561,25 +549,18 @@ function AddCandidatesView({ addCandidates }) {
                   <input value={row.email} onChange={(e) => updateCell(idx, "email", e.target.value)} placeholder="jane@example.com" className="w-44 rounded border border-transparent px-2 py-1 hover:border-gray-200 focus:border-blue-300 focus:outline-none" />
                 </td>
                 <td className="px-1 py-1">
-                  <input value={row.phone} onChange={(e) => updateCell(idx, "phone", e.target.value)} placeholder="+1 555 000 0000" className="w-36 rounded border border-transparent px-2 py-1 hover:border-gray-200 focus:border-blue-300 focus:outline-none" />
+                  <input value={row.phone} onChange={(e) => updateCell(idx, "phone", e.target.value)} placeholder="9876543210" className="w-36 rounded border border-transparent px-2 py-1 hover:border-gray-200 focus:border-blue-300 focus:outline-none" />
                 </td>
                 <td className="px-1 py-1">
-                  <select value={row.role} onChange={(e) => updateCell(idx, "role", e.target.value)} className="w-40 rounded border border-transparent px-2 py-1 hover:border-gray-200 focus:border-blue-300 focus:outline-none">
-                    {ROLES.map((r) => <option key={r} value={r}>{r}</option>)}
-                  </select>
+                  <input value={row.role} onChange={(e) => updateCell(idx, "role", e.target.value)} placeholder="Backend Engineer" className="w-40 rounded border border-transparent px-2 py-1 hover:border-gray-200 focus:border-blue-300 focus:outline-none" />
                 </td>
                 <td className="px-1 py-1">
-                  <select value={row.source} onChange={(e) => updateCell(idx, "source", e.target.value)} className="w-32 rounded border border-transparent px-2 py-1 hover:border-gray-200 focus:border-blue-300 focus:outline-none">
-                    {SOURCES.map((s) => <option key={s} value={s}>{s}</option>)}
-                  </select>
+                  <input value={row.source} onChange={(e) => updateCell(idx, "source", e.target.value)} placeholder="Referral" className="w-32 rounded border border-transparent px-2 py-1 hover:border-gray-200 focus:border-blue-300 focus:outline-none" />
                 </td>
                 <td className="px-1 py-1">
-                  <select value={row.status} onChange={(e) => updateCell(idx, "status", e.target.value)} className="w-32 rounded border border-transparent px-2 py-1 hover:border-gray-200 focus:border-blue-300 focus:outline-none">
+                  <select value={row.status} onChange={(e) => updateCell(idx, "status", e.target.value)} className="w-40 rounded border border-transparent px-2 py-1 hover:border-gray-200 focus:border-blue-300 focus:outline-none">
                     {STATUSES.map((s) => <option key={s.key} value={s.key}>{s.label}</option>)}
                   </select>
-                </td>
-                <td className="px-1 py-1">
-                  <input value={row.resume_url} onChange={(e) => updateCell(idx, "resume_url", e.target.value)} placeholder="https://…" className="w-44 rounded border border-transparent px-2 py-1 hover:border-gray-200 focus:border-blue-300 focus:outline-none" />
                 </td>
                 <td className="px-1 py-1">
                   <input value={row.notes} onChange={(e) => updateCell(idx, "notes", e.target.value)} placeholder="Optional note" className="w-44 rounded border border-transparent px-2 py-1 hover:border-gray-200 focus:border-blue-300 focus:outline-none" />
@@ -618,7 +599,7 @@ const TABS = [
 ];
 
 export default function CandidatePipelineBoard() {
-  const { candidates, connection, lastSyncedAt, refresh, justMoved, addCandidates } = usePipelineData({ simulate: true });
+  const { candidates, connection, lastSyncedAt, refresh, justMoved, addCandidates } = usePipelineData();
   const [selectedId, setSelectedId] = useState(null);
   const [tab, setTab] = useState("pipeline");
 
@@ -630,7 +611,7 @@ export default function CandidatePipelineBoard() {
         <div>
           <h1 className="text-lg font-medium text-gray-900">Candidate pipeline</h1>
           <p className="text-sm text-gray-500">
-            {candidates.length} candidates · mock data, updates simulated every ~4.5s · click a card for full details
+            {candidates.length} candidates · live from Supabase · click a card for full details
           </p>
         </div>
         <div className="flex items-center gap-3">
@@ -670,68 +651,3 @@ export default function CandidatePipelineBoard() {
     </div>
   );
 }
-
-// ---------------------------------------------------------------------------
-// SUPABASE INTEGRATION (reference — not wired up in this artifact)
-//
-// Once the `candidates` table exists, replace the body of usePipelineData()
-// with something like this. Keep the same return shape so the board doesn't
-// need to change. addCandidates() becomes an insert instead of local state.
-//
-// import { createClient } from '@supabase/supabase-js';
-// const supabase = createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
-//
-// function usePipelineData() {
-//   const [candidates, setCandidates] = useState([]);
-//   const [connection, setConnection] = useState('syncing');
-//   const [lastSyncedAt, setLastSyncedAt] = useState(new Date());
-//
-//   const fetchAll = useCallback(async () => {
-//     const { data, error } = await supabase
-//       .from('candidates')
-//       .select('id, name, role, source, status, last_activity_at, email, phone, resume_url, job_description, notes')
-//       .order('last_activity_at', { ascending: false });
-//     if (!error) {
-//       setCandidates(data);
-//       setLastSyncedAt(new Date());
-//       setConnection('connected');
-//     } else {
-//       setConnection('offline');
-//     }
-//   }, []);
-//
-//   const addCandidates = useCallback(async (rows) => {
-//     const { data, error } = await supabase.from('candidates').insert(rows).select();
-//     if (!error && data) setCandidates((prev) => [...prev, ...data]);
-//     return error ? 0 : data.length;
-//   }, []);
-//
-//   useEffect(() => {
-//     fetchAll();
-//
-//     // Option A: websockets via Supabase Realtime (preferred — instant, no polling cost)
-//     const channel = supabase
-//       .channel('candidates-changes')
-//       .on('postgres_changes', { event: '*', schema: 'public', table: 'candidates' }, (payload) => {
-//         setCandidates((prev) => {
-//           if (payload.eventType === 'DELETE') return prev.filter((c) => c.id !== payload.old.id);
-//           const next = prev.filter((c) => c.id !== payload.new.id);
-//           return [...next, payload.new];
-//         });
-//         setLastSyncedAt(new Date());
-//       })
-//       .subscribe((status) => setConnection(status === 'SUBSCRIBED' ? 'connected' : 'syncing'));
-//
-//     // Option B: polling fallback (use instead of/alongside Realtime if
-//     // websockets are blocked by a corporate network, e.g. some VPNs)
-//     // const interval = setInterval(fetchAll, 15000);
-//
-//     return () => {
-//       supabase.removeChannel(channel);
-//       // clearInterval(interval);
-//     };
-//   }, [fetchAll]);
-//
-//   return { candidates, connection, lastSyncedAt, refresh: fetchAll, addCandidates };
-// }
-// ---------------------------------------------------------------------------
