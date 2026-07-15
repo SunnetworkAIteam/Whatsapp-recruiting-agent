@@ -35,6 +35,7 @@ from app.status import (
     transition_status,
     update_candidate_metadata  # Assumed implemented in app/status.py to handle metadata fields
 )
+from app.validation import normalize_phone
 
 # Messaging layers and specific messaging exceptions
 from agent.send_functions import (
@@ -128,7 +129,14 @@ def handle_candidate_reply(message: TwilioInboundMessage) -> dict:
     Returns a dict describing the outcome, as required by
     webhook/orchestrator.py's `process_inbound_message`.
     """
-    candidate = get_candidate_by_phone(message.from_number)
+    # Twilio sends inbound numbers as "whatsapp:+91XXXXXXXXXX", but
+    # candidates are stored with normalized bare-digit phone numbers (see
+    # app/validation.py's normalize_phone, used during Sheets ingestion).
+    # Without normalizing here, real candidates who reply would never be
+    # found -- get_candidate_by_phone() would look for the raw
+    # "whatsapp:+91..." string, which never matches what's stored.
+    normalized_from = normalize_phone(message.from_number)
+    candidate = get_candidate_by_phone(normalized_from)
 
     if candidate is None:
         logger.warning(
