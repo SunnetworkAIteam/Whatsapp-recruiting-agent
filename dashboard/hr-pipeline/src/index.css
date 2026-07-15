@@ -1,1 +1,171 @@
+@import url('https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@500;600;700&family=Inter:wght@400;500;600&family=JetBrains+Mono:wght@400;500&display=swap');
 @import "tailwindcss";
+
+:root,
+[data-theme="light"] {
+  --page-bg: #f7f9fc;
+  --ink: #ffffff;
+  --surface: #ffffff;
+  --surface-hover: #f3f5f9;
+  --line: #e2e6ee;
+  --text-hi: #10131a;
+  --text-mid: #565f75;
+  --text-dim: #9aa2b5;
+  --signal: #0891b2;
+  --glow-1: rgba(8,145,178,0.06);
+  --glow-2: rgba(155,123,255,0.05);
+}
+
+[data-theme="dark"] {
+  --page-bg: #0a0e1a;
+  --ink: #0a0e1a;
+  --surface: #121a2e;
+  --surface-hover: #16203a;
+  --line: #1f2a45;
+  --text-hi: #eaf0ff;
+  --text-mid: #94a3c4;
+  --text-dim: #5c6a8c;
+  --signal: #3dd9eb;
+  --glow-1: rgba(61,217,235,0.12);
+  --glow-2: rgba(155,123,255,0.08);
+}
+
+[data-theme="cyber"] {
+  --page-bg: #000000;
+  --ink: #000000;
+  --surface: #060b06;
+  --surface-hover: #0a140a;
+  --line: #1a3a1a;
+  --text-hi: #39ff6a;
+  --text-mid: #2fbf55;
+  --text-dim: #1f7a35;
+  --signal: #39ff6a;
+  --glow-1: rgba(57,255,106,0.10);
+  --glow-2: rgba(57,255,106,0.05);
+}
+
+body {
+  background: var(--page-bg);
+}
+
+body {
+  background: var(--ink);
+  color: var(--text-hi);
+  font-family: 'Inter', system-ui, sans-serif;
+  position: relative;
+  overflow-x: hidden;
+}
+
+/* Subtle ambient glow orbs behind the content for depth, like a premium
+   "mission control" console rather than a flat dark page. Fixed so they
+   don't scroll with content; very low opacity so they read as ambience,
+   not decoration competing with the UI. */
+body::before,
+body::after {
+  content: "";
+  position: fixed;
+  border-radius: 50%;
+  filter: blur(120px);
+  pointer-events: none;
+  z-index: 0;
+}
+body::before {
+  width: 500px;
+  height: 500px;
+  top: -150px;
+  right: -100px;
+  background: radial-gradient(circle, var(--glow-1), transparent 70%);
+}
+body::after {
+  width: 600px;
+  height: 600px;
+  bottom: -200px;
+  left: -150px;
+  background: radial-gradient(circle, var(--glow-2), transparent 70%);
+}
+
+#root {
+  position: relative;
+  z-index: 1;
+}
+
+.font-display {
+  font-family: 'Space Grotesk', system-ui, sans-serif;
+}
+
+.font-mono {
+  font-family: 'JetBrains Mono', ui-monospace, monospace;
+}
+
+/* Sweeping sheen across the pipeline pulse bar */
+@keyframes sheen-sweep {
+  0% { transform: translateX(-100%); }
+  100% { transform: translateX(250%); }
+}
+.pulse-sheen {
+  animation: sheen-sweep 3.5s ease-in-out infinite;
+}
+
+/* Glow pulse when a card's status just changed */
+@keyframes glow-pop {
+  0% { box-shadow: 0 0 0 0 var(--glow-color, rgba(61, 217, 235, 0.6)); transform: scale(1); }
+  30% { box-shadow: 0 0 0 6px var(--glow-color, rgba(61, 217, 235, 0.25)); transform: scale(1.015); }
+  100% { box-shadow: 0 0 0 0 rgba(61, 217, 235, 0); transform: scale(1); }
+}
+.glow-pop {
+  animation: glow-pop 1.6s ease-out;
+}
+
+/* Slow continuous pulse for escalated cards */
+@keyframes escalate-pulse {
+  0%, 100% { box-shadow: 0 0 0 0 rgba(251, 93, 116, 0.35); }
+  50% { box-shadow: 0 0 0 5px rgba(251, 93, 116, 0.12); }
+}
+.escalate-pulse {
+  animation: escalate-pulse 2.4s ease-in-out infinite;
+}
+
+/* Count pop when a column's number changes */
+@keyframes count-pop {
+  0% { transform: scale(1); }
+  40% { transform: scale(1.28); }
+  100% { transform: scale(1); }
+}
+.count-pop {
+  animation: count-pop 0.4s ease-out;
+}
+
+/* Live indicator ring ping, slower and softer than default Tailwind ping */
+@keyframes live-ping {
+  0% { transform: scale(1); opacity: 0.7; }
+  100% { transform: scale(2.4); opacity: 0; }
+}
+.live-ping {
+  animation: live-ping 2s cubic-bezier(0, 0, 0.2, 1) infinite;
+}
+
+@keyframes fade-slide-in {
+  0% { opacity: 0; transform: translateY(-8px); }
+  100% { opacity: 1; transform: translateY(0); }
+}
+.fade-slide-in {
+  animation: fade-slide-in 0.5s ease-out;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .pulse-sheen, .glow-pop, .escalate-pulse, .count-pop, .live-ping, .fade-slide-in {
+    animation: none !important;
+  }
+}
+
+/* Thin custom scrollbar for the board's horizontal scroll */
+.thin-scroll::-webkit-scrollbar {
+  height: 8px;
+}
+.thin-scroll::-webkit-scrollbar-track {
+  background: transparent;
+}
+.thin-scroll::-webkit-scrollbar-thumb {
+  background: var(--line);
+  border-radius: 4px;
+}

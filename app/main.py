@@ -1,13 +1,26 @@
 import os
 from dotenv import load_dotenv
 from fastapi import FastAPI
+from fastapi.middleware.cors import CORSMiddleware
 from supabase import create_client
 from app.validation import validate_candidate, normalize_phone, is_duplicate
 from app.google_sheets import fetch_all_candidates_from_sheets
+from app.queue import enqueue_pending_candidates
 
 load_dotenv()
 
 app = FastAPI()
+
+# Allows the dashboard (running on a different port, e.g. localhost:5173)
+# to call this API directly from the browser. Restrict allow_origins to
+# real deployed dashboard URL(s) once this goes to production -- "*" is
+# fine for local dev only.
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
 
 @app.on_event("startup")
@@ -55,6 +68,7 @@ async def sync_sheets():
             "name": record.get("name"),
             "phone": normalized,
             "role": record.get("role"),
+            "status": "pending",
             "location": record.get("location"),
             "email": record.get("email"),
             "current_company": record.get("current_company"),
@@ -73,3 +87,23 @@ async def sync_sheets():
         inserted.append(record)
 
     return {"inserted": inserted, "skipped": skipped, "warnings": warnings}
+
+
+@app.post("/trigger-sync")
+async def trigger_sync():
+    """
+    Manual "sync now" endpoint for the dashboard's trigger button.
+    Does what /sync-sheets does (pull new candidates from Google Sheets
+    into Supabase), then immediately enqueues any pending candidates for
+    sending instead of waiting for Celery Beat's next periodic tick
+    (which still runs independently as the automatic safety net).
+    """
+    sync_result = await sync_sheets()
+
+    try:
+        enqueue_pending_candidates()
+        enqueue_status = "ok"
+    except Exception as e:
+        enqueue_status = f"error: {str(e)}"
+
+    return {**sync_result, "enqueue_status": enqueue_status}

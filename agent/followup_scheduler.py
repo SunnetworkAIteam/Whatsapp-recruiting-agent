@@ -2,31 +2,27 @@
 agent/followup_scheduler.py
 
 Periodic (Celery Beat) task that sends WhatsApp follow-up templates to
-candidates who haven't replied after the initial outreach.
+candidates in two separate tracks:
 
-Business rules (per project notes):
-    * Two follow-ups total, 24 hours apart.
-    * All outbound messages (first + follow-ups) are sent after 9 PM IST only.
-    * Each follow-up is a different, escalating-in-tone template.
+Track A -- never replied to the initial outreach:
+    outreach (already sent) -> 24h, no reply -> Template 2 (NO_REPLY)
+                             -> 24h, still no reply -> Template 4 (FINAL_REMINDER)
 
-This module only decides WHO is due for a follow-up and WHEN -- actual
-sending is delegated to messaging.send_template_message, and template
-selection SIDs are read the same way agent/pipeline.py does.
+Track B -- replied and had a conversation, but went silent before
+scheduling an interview:
+    24h after their last message, if status is "replied" but hasn't
+    reached "qualified"/"awaiting_interview"/"booked" -> Template 3
+    (INTERVIEW_FOLLOW_UP)
 
-This intentionally does NOT change candidate `status` (which stays
-"messaged" throughout both follow-ups) to avoid the status/transition
-mismatch currently present in agent/pipeline.py for post-outreach states
-(see notes below). Follow-up progress is tracked purely via the
-followup_1_sent_at / followup_2_sent_at columns already in the schema.
+Both tracks are purely time-based off elapsed hours since the relevant
+prior message -- there is no time-of-day restriction (per project
+decision, only the initial outreach and follow-up timing matters, not
+when in the day it happens).
 
-Known issue this module deliberately avoids replicating:
-    agent/pipeline.py transitions candidates to statuses such as
-    "follow_up_sent" / "final_reminder_sent" / "awaiting_interview", none
-    of which exist in app/status.py's VALID_STATUSES or
-    ALLOWED_TRANSITIONS. That will raise ValueError at runtime whenever
-    those paths are hit. This is a pre-existing bug (from the Twilio
-    send functions PR) independent of this scheduler and should be fixed
-    separately in app/status.py and/or agent/pipeline.py.
+Track B's condition (status="replied" + 24h of inactivity) is a stand-in
+until a dedicated DB column/signal for "had a conversation but didn't
+schedule" is added -- see project notes. Swap the condition in
+_is_track_b_eligible() once that column exists.
 """
 
 from __future__ import annotations
@@ -35,33 +31,30 @@ import logging
 import os
 from datetime import datetime, timedelta, timezone
 from typing import Optional
-from zoneinfo import ZoneInfo
-
 from app.status import get_candidates_pending_followup, update_candidate_metadata
+from app.phone_utils import to_e164_india
 from agent.send_functions import send_template_message, MessagingConfigError, MessageSendError
 
 logger = logging.getLogger("agent.followup_scheduler")
 
-IST = ZoneInfo("Asia/Kolkata")
-
-# Only send outbound messages after this hour, IST (24h clock).
-SEND_AFTER_HOUR_IST = 21  # 9 PM
-
-# Spacing between outreach -> follow-up 1 -> follow-up 2.
+# Spacing for both tracks' timing checks.
 FOLLOWUP_INTERVAL = timedelta(hours=24)
 
-FOLLOWUP_1_TEMPLATE_SID: Optional[str] = os.environ.get("TWILIO_NO_REPLY_TEMPLATE_SID")
-FOLLOWUP_2_TEMPLATE_SID: Optional[str] = os.environ.get("TWILIO_FINAL_REMINDER_TEMPLATE_SID")
+# Track A template SIDs
+NO_REPLY_TEMPLATE_SID: Optional[str] = os.environ.get("TWILIO_NO_REPLY_TEMPLATE_SID")
+FINAL_REMINDER_TEMPLATE_SID: Optional[str] = os.environ.get("TWILIO_FINAL_REMINDER_TEMPLATE_SID")
 
+# Track B template SID
+INTERVIEW_FOLLOW_UP_TEMPLATE_SID: Optional[str] = os.environ.get("TWILIO_INTERVIEW_FOLLOW_UP_TEMPLATE_SID")
 
-def _is_within_send_window(now_ist: datetime) -> bool:
-    """
-    True if it's currently at/after 9 PM IST (and before midnight -- the
-    project notes only specify "after 9 PM", so this treats the window as
-    open from 9 PM until end of day; adjust here if a specific end time is
-    later decided).
-    """
-    return now_ist.hour >= SEND_AFTER_HOUR_IST
+# Public URL Twilio calls with delivery status updates (failed/undelivered
+# etc). Used to detect candidates who couldn't be reached via WhatsApp --
+# see webhook/app.py's /webhooks/whatsapp/status endpoint.
+STATUS_CALLBACK_URL: Optional[str] = os.environ.get("TWILIO_STATUS_CALLBACK_URL")
+
+# Statuses that mean a candidate has already moved past "just replied,
+# hasn't scheduled" -- Track B should not fire for these.
+_SCHEDULED_OR_BEYOND_STATUSES = {"qualified", "awaiting_interview", "booked"}
 
 
 def _parse_timestamp(value) -> Optional[datetime]:
@@ -73,7 +66,32 @@ def _parse_timestamp(value) -> Optional[datetime]:
     return datetime.fromisoformat(value.replace("Z", "+00:00"))
 
 
-def _due_for_followup_1(candidate: dict, now_utc: datetime) -> bool:
+def _build_followup_variables(candidate: dict) -> dict:
+    """
+    All three follow-up templates (NO_REPLY, FINAL_REMINDER,
+    INTERVIEW_FOLLOW_UP) use the same two placeholders:
+        {{1}} = candidate name
+        {{2}} = role
+    Without passing these, Twilio silently falls back to the sample
+    values entered at template-approval time (e.g. "Rajesh Kumar",
+    "AI Quality & Optimization Engineer") instead of the real candidate's
+    data -- this bit us once already on a live test send.
+    """
+    return {
+        "1": candidate.get("name") or "there",
+        "2": candidate.get("role") or "this role",
+    }
+
+
+# ---------------------------------------------------------------------------
+# Track A: never replied
+# ---------------------------------------------------------------------------
+
+def _is_track_a_candidate(candidate: dict) -> bool:
+    return candidate.get("status") in ("messaged", "follow_up_sent")
+
+
+def _due_for_no_reply_template(candidate: dict, now_utc: datetime) -> bool:
     if candidate.get("followup_1_sent_at"):
         return False  # already sent
     first_sent = _parse_timestamp(candidate.get("first_outreach_sent_at"))
@@ -82,76 +100,124 @@ def _due_for_followup_1(candidate: dict, now_utc: datetime) -> bool:
     return now_utc - first_sent >= FOLLOWUP_INTERVAL
 
 
-def _due_for_followup_2(candidate: dict, now_utc: datetime) -> bool:
+def _due_for_final_reminder(candidate: dict, now_utc: datetime) -> bool:
     if candidate.get("followup_2_sent_at"):
         return False  # already sent
-    followup_1_sent = _parse_timestamp(candidate.get("followup_1_sent_at"))
-    if not followup_1_sent:
-        return False  # hasn't had followup 1 yet
-    return now_utc - followup_1_sent >= FOLLOWUP_INTERVAL
+    no_reply_sent = _parse_timestamp(candidate.get("followup_1_sent_at"))
+    if not no_reply_sent:
+        return False  # hasn't had the no-reply template yet
+    return now_utc - no_reply_sent >= FOLLOWUP_INTERVAL
 
+
+# ---------------------------------------------------------------------------
+# Track B: replied but didn't schedule
+# ---------------------------------------------------------------------------
+
+def _is_track_b_eligible(candidate: dict, now_utc: datetime) -> bool:
+    """
+    True if this candidate replied and had a conversation, but hasn't
+    reached scheduling/qualified/booked, and it's been 24h+ since their
+    last message with no further activity.
+
+    NOTE: this is a stand-in condition pending a dedicated DB column for
+    "had a conversation but didn't schedule" (see project notes). Update
+    this function once that column exists instead of inferring from
+    status + timing.
+    """
+    if candidate.get("status") != "replied":
+        return False
+    if candidate.get("interview_followup_sent_at"):
+        return False  # already sent, don't repeat
+
+    last_msg = _parse_timestamp(candidate.get("last_candidate_message_at"))
+    if not last_msg:
+        return False
+    return now_utc - last_msg >= FOLLOWUP_INTERVAL
+
+
+# ---------------------------------------------------------------------------
+# Main entry point
+# ---------------------------------------------------------------------------
 
 def run_followup_cycle() -> dict:
     """
     Main entry point, intended to be invoked by a Celery Beat schedule
-    (see app/celery_app.py). Evaluates every 'messaged' candidate and
-    sends the appropriate follow-up template if due and within the
-    9 PM IST send window.
+    (see app/celery_app.py). Evaluates every eligible candidate across
+    both tracks and sends the appropriate template if due.
 
     Returns a summary dict for logging/observability.
     """
     now_utc = datetime.now(timezone.utc)
-    now_ist = now_utc.astimezone(IST)
 
-    if not _is_within_send_window(now_ist):
-        logger.info(
-            "Outside the 9 PM IST send window (now=%s IST); skipping this cycle.",
-            now_ist.isoformat(),
-        )
-        return {"sent": 0, "skipped_outside_window": True}
-
-    if not FOLLOWUP_1_TEMPLATE_SID or not FOLLOWUP_2_TEMPLATE_SID:
+    missing_sids = [
+        name for name, sid in (
+            ("TWILIO_NO_REPLY_TEMPLATE_SID", NO_REPLY_TEMPLATE_SID),
+            ("TWILIO_FINAL_REMINDER_TEMPLATE_SID", FINAL_REMINDER_TEMPLATE_SID),
+            ("TWILIO_INTERVIEW_FOLLOW_UP_TEMPLATE_SID", INTERVIEW_FOLLOW_UP_TEMPLATE_SID),
+        ) if not sid
+    ]
+    if missing_sids:
         logger.error(
-            "Follow-up template SIDs are not configured "
-            "(TWILIO_NO_REPLY_TEMPLATE_SID / TWILIO_FINAL_REMINDER_TEMPLATE_SID); "
-            "skipping this cycle."
+            "Missing follow-up template SID configuration: %s; skipping this cycle.",
+            missing_sids,
         )
-        return {"sent": 0, "error": "Missing template SID configuration"}
+        return {"sent": 0, "error": f"Missing template SID configuration: {missing_sids}"}
 
     candidates = get_candidates_pending_followup()
-    sent_followup_1, sent_followup_2, errors = 0, 0, []
+    sent_no_reply, sent_final_reminder, sent_interview_followup, errors = 0, 0, 0, []
 
     for candidate in candidates:
         candidate_id = candidate["id"]
-        phone = candidate["phone"]
+        phone = to_e164_india(candidate["phone"])
 
         try:
-            if _due_for_followup_1(candidate, now_utc):
-                twilio_sid = send_template_message(
-                    to=phone,
-                    template_sid=FOLLOWUP_1_TEMPLATE_SID,
-                    message_type="NO_REPLY_FOLLOWUP_1",
-                )
-                update_candidate_metadata(candidate_id, {"followup_1_sent_at": now_utc})
-                logger.info(
-                    "Sent follow-up 1 to candidate %s (twilio_sid=%s)",
-                    candidate_id, twilio_sid,
-                )
-                sent_followup_1 += 1
-                continue  # don't also evaluate followup_2 in the same cycle
+            if _is_track_a_candidate(candidate):
+                if _due_for_no_reply_template(candidate, now_utc):
+                    twilio_sid = send_template_message(
+                        to=phone,
+                        template_sid=NO_REPLY_TEMPLATE_SID,
+                        template_variables=_build_followup_variables(candidate),
+                        message_type="TRACK_A_NO_REPLY",
+                        status_callback=STATUS_CALLBACK_URL,
+                    )
+                    update_candidate_metadata(candidate_id, {"followup_1_sent_at": now_utc})
+                    logger.info(
+                        "Track A: sent no-reply template to candidate %s (twilio_sid=%s)",
+                        candidate_id, twilio_sid,
+                    )
+                    sent_no_reply += 1
+                    continue
 
-            if _due_for_followup_2(candidate, now_utc):
+                if _due_for_final_reminder(candidate, now_utc):
+                    twilio_sid = send_template_message(
+                        to=phone,
+                        template_sid=FINAL_REMINDER_TEMPLATE_SID,
+                        template_variables=_build_followup_variables(candidate),
+                        message_type="TRACK_A_FINAL_REMINDER",
+                        status_callback=STATUS_CALLBACK_URL,
+                    )
+                    update_candidate_metadata(candidate_id, {"followup_2_sent_at": now_utc})
+                    logger.info(
+                        "Track A: sent final reminder to candidate %s (twilio_sid=%s)",
+                        candidate_id, twilio_sid,
+                    )
+                    sent_final_reminder += 1
+                    continue
+
+            elif _is_track_b_eligible(candidate, now_utc):
                 twilio_sid = send_template_message(
                     to=phone,
-                    template_sid=FOLLOWUP_2_TEMPLATE_SID,
-                    message_type="FINAL_REMINDER_FOLLOWUP_2",
+                    template_sid=INTERVIEW_FOLLOW_UP_TEMPLATE_SID,
+                    template_variables=_build_followup_variables(candidate),
+                    message_type="TRACK_B_INTERVIEW_FOLLOW_UP",
+                    status_callback=STATUS_CALLBACK_URL,
                 )
-                update_candidate_metadata(candidate_id, {"followup_2_sent_at": now_utc})
+                update_candidate_metadata(candidate_id, {"interview_followup_sent_at": now_utc})
                 logger.info(
-                    "Sent follow-up 2 (final reminder) to candidate %s (twilio_sid=%s)",
+                    "Track B: sent interview follow-up to candidate %s (twilio_sid=%s)",
                     candidate_id, twilio_sid,
                 )
-                sent_followup_2 += 1
+                sent_interview_followup += 1
 
         except (MessagingConfigError, MessageSendError) as exc:
             logger.error(
@@ -161,8 +227,9 @@ def run_followup_cycle() -> dict:
             errors.append({"candidate_id": candidate_id, "error": str(exc)})
 
     summary = {
-        "sent_followup_1": sent_followup_1,
-        "sent_followup_2": sent_followup_2,
+        "sent_no_reply": sent_no_reply,
+        "sent_final_reminder": sent_final_reminder,
+        "sent_interview_followup": sent_interview_followup,
         "errors": errors,
         "evaluated": len(candidates),
     }
