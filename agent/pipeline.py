@@ -345,8 +345,28 @@ def handle_candidate_reply(message: TwilioInboundMessage) -> dict:
             "reason": f"Messaging error encountered while sending conversational text: {exc}",
         }
 
-    # Complete state transition
-    transition_status(candidate_id, result.status.value)
+    # Persist conversation history so the LLM has context on the next
+    # turn. Without this, conversation_history is always empty/None on
+    # every reply, and the LLM re-introduces itself and re-asks the same
+    # opening questions every single message, ignoring anything the
+    # candidate already said.
+    updated_history = list(conversation_history or [])
+    updated_history.append({"role": "user", "content": message.body})
+    updated_history.append({"role": "assistant", "content": result.reply})
+    update_candidate_metadata(candidate_id, {"conversation_history": updated_history})
+
+    # Complete state transition. Disallowed transitions (e.g. a
+    # "declined" candidate keeps chatting and the LLM classifies the
+    # reply as "replied") are caught here rather than crashing the whole
+    # webhook request -- the candidate's status simply stays as-is, and
+    # this is logged for visibility.
+    try:
+        transition_status(candidate_id, result.status.value)
+    except ValueError as exc:
+        logger.warning(
+            "Skipped status transition for candidate %s: %s",
+            candidate_id, exc,
+        )
 
     return {
         "escalated": result.escalated,
