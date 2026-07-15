@@ -114,10 +114,16 @@ def update_candidate_metadata(candidate_id: int, updates: dict) -> dict:
 
 def get_candidates_pending_followup() -> list[dict]:
     """
-    Return all candidates in 'messaged' status who haven't opted out or
-    replied, for the follow-up scheduler to evaluate. Filtering on timing
-    (24h since last contact, 9PM IST window) happens in the scheduler
-    itself, since that logic depends on the current time, not just DB state.
+    Return candidates the follow-up scheduler should evaluate: those in
+    "messaged" status (Track A -- never replied) or "replied" status
+    (Track B -- engaged but hasn't scheduled an interview yet). Terminal
+    states (booked, declined, escalated) are excluded since no further
+    outbound follow-up makes sense there.
+
+    Filtering on timing (24h since last contact, 9PM IST window) and on
+    which track a candidate falls into happens in the scheduler itself,
+    since that logic depends on the current time and per-candidate state,
+    not just this DB query.
     """
     if supabase is None:
         raise RuntimeError("Supabase client not initialized")
@@ -125,7 +131,7 @@ def get_candidates_pending_followup() -> list[dict]:
     result = (
         supabase.table("candidates")
         .select("*")
-        .eq("status", "messaged")
+        .in_("status", ["messaged", "follow_up_sent", "replied"])
         .execute()
     )
     return result.data or []

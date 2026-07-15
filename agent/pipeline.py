@@ -70,6 +70,11 @@ TEMPLATE_SID_MAPPING = {
     TemplateType.INTERVIEW_FOLLOW_UP: os.environ.get("TWILIO_INTERVIEW_FOLLOW_UP_TEMPLATE_SID"),
 }
 
+# Public URL Twilio calls with delivery status updates (failed/undelivered
+# etc). Used to detect candidates who couldn't be reached via WhatsApp --
+# see webhook/app.py's /webhooks/whatsapp/status endpoint.
+STATUS_CALLBACK_URL = os.environ.get("TWILIO_STATUS_CALLBACK_URL")
+
 # ---------------------------------------------------------------------------
 # Role -> work arrangement details, used to fill the JOB_OUTREACH template's
 # {{3}} (work type) and {{4}} (shift/hours) placeholders.
@@ -189,6 +194,7 @@ def handle_candidate_reply(message: TwilioInboundMessage) -> dict:
             candidate_id, phone_number, rule_result.action.value, rule_result.reason
         )
         transition_status(candidate_id, CandidateStatus.ESCALATED.value)
+        update_candidate_metadata(candidate_id, {"escalation_reason": rule_result.reason})
         return {
             "escalated": True,
             "status": CandidateStatus.ESCALATED.value,
@@ -255,6 +261,7 @@ def handle_candidate_reply(message: TwilioInboundMessage) -> dict:
                 to=phone_number,
                 template_sid=content_sid,
                 template_variables=template_variables,
+                status_callback=STATUS_CALLBACK_URL,
             )
             logger.info("Successfully sent template. Candidate ID: %s. Type: %s. Twilio Message SID: %s", candidate_id, template_type.value, twilio_sid)
         except (MessagingConfigError, MessageSendError) as exc:
@@ -323,6 +330,7 @@ def handle_candidate_reply(message: TwilioInboundMessage) -> dict:
             candidate_id, phone_number, result.reason
         )
         transition_status(candidate_id, CandidateStatus.ESCALATED.value)
+        update_candidate_metadata(candidate_id, {"escalation_reason": result.reason})
         return {
             "escalated": True,
             "status": CandidateStatus.ESCALATED.value,

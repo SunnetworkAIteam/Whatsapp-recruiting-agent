@@ -229,6 +229,7 @@ def send_template_message(
     template_sid: str,
     template_variables: Optional[Mapping[str, Any]] = None,
     message_type: str = "UNKNOWN",
+    status_callback: Optional[str] = None,
 ) -> str:
     """
     Send an approved WhatsApp template message via Twilio.
@@ -280,6 +281,8 @@ def send_template_message(
         }
         if content_variables is not None:
             kwargs["content_variables"] = content_variables
+        if status_callback:
+            kwargs["status_callback"] = status_callback
 
         message = client.messages.create(**kwargs)
     except TwilioRestException as exc:

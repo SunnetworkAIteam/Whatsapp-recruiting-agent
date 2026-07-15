@@ -28,3 +28,7 @@ node_modules/
 # Editor/IDE
 .vscode/
 .idea/
+# Runtime artifacts from scripts/start_all.sh
+.pids
+celerybeat-schedule
+logs/

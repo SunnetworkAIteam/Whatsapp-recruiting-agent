@@ -108,3 +108,63 @@ async def whatsapp_inbound_webhook(request: Request):
 @app.get("/health")
 def health():
     return {"status": "ok"}
+
+
+@app.post("/webhooks/whatsapp/status")
+async def whatsapp_status_callback(request: Request):
+    """
+    Receives delivery status updates from Twilio for outbound messages
+    (set via the status_callback param on send_template_message --
+    see agent/send_functions.py and app/tasks.py).
+
+    Twilio doesn't offer a direct "does this number have WhatsApp" check
+    up front; the real-world signal is that a message sent to a number
+    without WhatsApp comes back with status "failed" or "undelivered"
+    (with an error code) some time after sending, delivered here.
+
+    When that happens, this flags the candidate's platform column as
+    "no_whatsapp" and stores the raw error for a human to review --
+    rather than guessing the exact meaning of every possible Twilio error
+    code, any failed/undelivered status is treated as "couldn't reach
+    this candidate via WhatsApp" and surfaced for manual follow-up.
+    """
+    form = await request.form()
+    params = {key: str(value) for key, value in form.items()}
+
+    message_sid = params.get("MessageSid", "")
+    message_status = params.get("MessageStatus", "")
+    error_code = params.get("ErrorCode", "")
+    error_message = params.get("ErrorMessage", "")
+    to_number = params.get("To", "")
+
+    logger.info(
+        "Status callback: sid=%s status=%s error_code=%s to=%s",
+        message_sid, message_status, error_code, to_number,
+    )
+
+    if message_status in ("failed", "undelivered") and to_number:
+        from app.validation import normalize_phone
+        from app.status import get_candidate_by_phone, update_candidate_metadata
+
+        normalized_phone = normalize_phone(to_number)
+        candidate = get_candidate_by_phone(normalized_phone)
+
+        if candidate:
+            update_candidate_metadata(candidate["id"], {
+                "platform": "no_whatsapp",
+                "delivery_status": message_status,
+                "delivery_error_code": error_code,
+                "delivery_error_message": error_message,
+            })
+            logger.warning(
+                "Candidate %s flagged as no_whatsapp (error_code=%s, message=%s)",
+                candidate["id"], error_code, error_message,
+            )
+        else:
+            logger.warning(
+                "Received failed delivery status for unrecognized number (sid=%s); "
+                "no matching candidate found.",
+                message_sid,
+            )
+
+    return Response(status_code=204)

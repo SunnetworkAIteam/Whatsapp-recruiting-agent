@@ -9,7 +9,7 @@ celery_app = Celery(
     "candidate_worker",
     broker=REDIS_URL,
     backend=REDIS_URL,
-    include=["agent.followup_scheduler_task"],
+    include=["agent.followup_scheduler_task", "app.tasks", "app.enqueue_task"],
 )
 
 # Rate limit: max 10 tasks per minute
@@ -27,9 +27,18 @@ celery_app.conf.task_annotations = {
 # 9 PM IST == 3:30 PM UTC. Running every 15 min from 3:30 PM to 11:45 PM
 # UTC covers the whole "after 9 PM IST" window for same-day sends.
 celery_app.conf.beat_schedule = {
+    # No time-of-day restriction anymore (per project decision) --
+    # both the initial-outreach enqueue and the follow-up cycle run
+    # purely on elapsed time relative to each candidate's own timestamps,
+    # so it's safe (and desired, for fast testing/turnaround) to check
+    # frequently.
+    "enqueue-pending-candidates": {
+        "task": "app.enqueue_task.enqueue_pending_candidates_task",
+        "schedule": crontab(minute="*/5"),
+    },
     "run-followup-cycle": {
         "task": "agent.followup_scheduler_task.run_followup_cycle_task",
-        "schedule": crontab(minute="*/15", hour="15-23"),
+        "schedule": crontab(minute="*/5"),
     },
 }
 celery_app.conf.timezone = "UTC"
