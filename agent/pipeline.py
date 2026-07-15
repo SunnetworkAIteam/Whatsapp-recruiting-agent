@@ -345,6 +345,16 @@ def handle_candidate_reply(message: TwilioInboundMessage) -> dict:
             "reason": f"Messaging error encountered while sending conversational text: {exc}",
         }
 
+    # Persist conversation history so the LLM has context on the next
+    # turn. Without this, conversation_history is always empty/None on
+    # every reply, and the LLM re-introduces itself and re-asks the same
+    # opening questions every single message, ignoring anything the
+    # candidate already said.
+    updated_history = list(conversation_history or [])
+    updated_history.append({"role": "user", "content": message.body})
+    updated_history.append({"role": "assistant", "content": result.reply})
+    update_candidate_metadata(candidate_id, {"conversation_history": updated_history})
+
     # Complete state transition
     transition_status(candidate_id, result.status.value)
 

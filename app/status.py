@@ -50,7 +50,23 @@ def transition_status(candidate_id: int, new_status: str):
         return f"Candidate {candidate_id} already in status {current_status}; no transition needed"
 
     if new_status not in ALLOWED_TRANSITIONS.get(current_status, []):
-        raise ValueError(f"Cannot transition from {current_status} to {new_status}")
+        # Disallowed transitions (e.g. a "declined" candidate keeps
+        # chatting and the LLM classifies a reply as "replied") are logged
+        # rather than raised. A rigid state machine crashing the whole
+        # inbound-message handler over an unusual conversational turn is
+        # too fragile -- better to skip the status update, keep the
+        # candidate's status as-is, and let a human notice the log line
+        # than to 500 and force a Twilio retry.
+        import logging
+        logging.getLogger("app.status").warning(
+            "Skipped disallowed status transition for candidate %s: "
+            "%s -> %s (staying at %s)",
+            candidate_id, current_status, new_status, current_status,
+        )
+        return (
+            f"Skipped disallowed transition for candidate {candidate_id}: "
+            f"{current_status} -> {new_status}"
+        )
     supabase.table("candidates").update({"status": new_status}).eq("id", candidate_id).execute()
     return f"Candidate {candidate_id} transitioned from {current_status} to {new_status}"
 
