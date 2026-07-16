@@ -118,6 +118,18 @@ def rows_to_records(rows, role: str):
         padded = row + [""] * (len(header) - len(row))
         record = dict(zip(header, padded))
 
+        # Strip leading/trailing whitespace from every text field. Manual
+        # entry in Sheets easily introduces stray spaces (e.g. "Usha "
+        # instead of "Usha"), which then silently breaks any exact-match
+        # grouping or comparison downstream (recruiter grouping, dedup,
+        # display) without ever showing up as an obvious error -- fixing
+        # it once here, at the source, means every field is protected
+        # rather than patching each symptom separately as it's noticed.
+        record = {
+            key: (value.strip() if isinstance(value, str) else value)
+            for key, value in record.items()
+        }
+
         if "phone" in record:
             record["phone"] = _fix_phone_value(record["phone"])
 

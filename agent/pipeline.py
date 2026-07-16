@@ -202,7 +202,18 @@ def handle_candidate_reply(message: TwilioInboundMessage) -> dict:
             candidate_id, phone_number, rule_result.action.value, rule_result.reason
         )
         transition_status(candidate_id, CandidateStatus.ESCALATED.value)
-        update_candidate_metadata(candidate_id, {"escalation_reason": rule_result.reason})
+        now_ts = datetime.now(timezone.utc)
+        if candidate.get("status") == CandidateStatus.ESCALATED.value:
+            # Already escalated: don't overwrite the original reason with
+            # a repeat trigger -- just note that a new message came in
+            # after escalation, so a human knows there's unread activity.
+            update_candidate_metadata(candidate_id, {"last_message_after_escalation_at": now_ts})
+        else:
+            # First time escalating: record both the reason and when.
+            update_candidate_metadata(candidate_id, {
+                "escalation_reason": rule_result.reason,
+                "escalated_at": now_ts,
+            })
         return {
             "escalated": True,
             "status": CandidateStatus.ESCALATED.value,
@@ -338,7 +349,18 @@ def handle_candidate_reply(message: TwilioInboundMessage) -> dict:
             candidate_id, phone_number, result.reason
         )
         transition_status(candidate_id, CandidateStatus.ESCALATED.value)
-        update_candidate_metadata(candidate_id, {"escalation_reason": result.reason})
+        now_ts = datetime.now(timezone.utc)
+        if candidate.get("status") == CandidateStatus.ESCALATED.value:
+            # Already escalated (this is the LLM-layer short-circuit path
+            # for a candidate who messages again after being escalated).
+            # Don't overwrite the original real reason with the generic
+            # "already escalated" text -- just flag unread activity.
+            update_candidate_metadata(candidate_id, {"last_message_after_escalation_at": now_ts})
+        else:
+            update_candidate_metadata(candidate_id, {
+                "escalation_reason": result.reason,
+                "escalated_at": now_ts,
+            })
         return {
             "escalated": True,
             "status": CandidateStatus.ESCALATED.value,

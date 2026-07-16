@@ -24,9 +24,14 @@ VALID_STATUSES = [
 
 ALLOWED_TRANSITIONS = {
     "pending": ["messaged", "declined"],
-    "messaged": ["follow_up_sent", "replied", "declined"],
-    "follow_up_sent": ["final_reminder_sent", "replied", "declined"],
-    "final_reminder_sent": ["replied", "declined"],
+    # "escalated" is reachable from every active pre-reply state, not just
+    # "replied" -- a candidate can trigger an escalation (e.g. asking
+    # about visa/legal topics) on their very first reply, before ever
+    # normally transitioning to "replied". Missing this caused a real
+    # ValueError crash in production testing.
+    "messaged": ["follow_up_sent", "replied", "escalated", "declined"],
+    "follow_up_sent": ["final_reminder_sent", "replied", "escalated", "declined"],
+    "final_reminder_sent": ["replied", "escalated", "declined"],
     "replied": ["qualified", "escalated", "awaiting_interview", "declined"],
     "awaiting_interview": ["booked", "qualified", "escalated", "declined"],
     "qualified": ["booked", "declined"],
