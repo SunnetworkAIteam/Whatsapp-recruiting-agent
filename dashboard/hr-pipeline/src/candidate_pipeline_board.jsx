@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef, useCallback, useMemo } from "react";
+import React, { useState, useEffect, useRef, useCallback, useMemo } from "react";
 import Papa from "papaparse";
 import {
   LayoutDashboard,
@@ -59,12 +59,110 @@ const ENGAGED_STATUSES = new Set([
 
 const SOURCES_FALLBACK = ["LinkedIn", "Referral", "Careers page", "Indeed", "Sourced"];
 
+// ---------------------------------------------------------------------------
+// SCHEDULING LIKELIHOOD -- a simple, transparent rule-based score
+// estimating how likely a candidate is to schedule an interview, based
+// on their current status, how engaged they've been in conversation,
+// and a few positive/negative keyword signals in what they've actually
+// said. Not an LLM call -- deliberately cheap, instant, and explainable
+// (each contributing factor is returned alongside the score) rather
+// than a black-box prediction.
+// ---------------------------------------------------------------------------
+const POSITIVE_SIGNAL_WORDS = [
+  "interested", "yes", "sure", "sounds good", "when", "schedule",
+  "available", "notice period", "ctc", "salary", "role", "details",
+];
+const NEGATIVE_SIGNAL_WORDS = [
+  "not interested", "no thanks", "busy", "later", "stop", "unsubscribe",
+  "declined", "not looking", "already have", "no ",
+];
+
+const STATUS_BASE_SCORE = {
+  pending: 0,
+  messaged: 10,
+  follow_up_sent: 8,
+  final_reminder_sent: 5,
+  replied: 40,
+  awaiting_interview: 90,
+  qualified: 70,
+  escalated: 45,
+  booked: 100,
+  declined: 0,
+};
+
+function computeSchedulingLikelihood(candidate) {
+  const history = candidate.conversation_history || [];
+  const userTurns = history.filter((t) => t.role === "user");
+
+  let score = STATUS_BASE_SCORE[candidate.status] ?? 20;
+  const factors = [];
+
+  factors.push({ label: `Status: ${candidate.status}`, value: STATUS_BASE_SCORE[candidate.status] ?? 20 });
+
+  // Engagement: more back-and-forth signals real interest, up to a cap.
+  const engagementBonus = Math.min(userTurns.length * 4, 20);
+  if (engagementBonus > 0) {
+    score += engagementBonus;
+    factors.push({ label: `${userTurns.length} message(s) from candidate`, value: engagementBonus });
+  }
+
+  // Keyword signals in the candidate's own messages only.
+  const allUserText = userTurns.map((t) => t.content.toLowerCase()).join(" ");
+  let positiveHits = 0;
+  let negativeHits = 0;
+  POSITIVE_SIGNAL_WORDS.forEach((w) => {
+    if (allUserText.includes(w)) positiveHits += 1;
+  });
+  NEGATIVE_SIGNAL_WORDS.forEach((w) => {
+    if (allUserText.includes(w)) negativeHits += 1;
+  });
+
+  if (positiveHits > 0) {
+    const bonus = Math.min(positiveHits * 5, 15);
+    score += bonus;
+    factors.push({ label: `${positiveHits} positive signal(s) in messages`, value: bonus });
+  }
+  if (negativeHits > 0) {
+    const penalty = Math.min(negativeHits * 15, 40);
+    score -= penalty;
+    factors.push({ label: `${negativeHits} negative signal(s) in messages`, value: -penalty });
+  }
+
+  const clamped = Math.max(0, Math.min(100, Math.round(score)));
+  return { score: clamped, factors };
+}
+
 function hexToRgba(hex, alpha) {
   const h = hex.replace("#", "");
   const r = parseInt(h.substring(0, 2), 16);
   const g = parseInt(h.substring(2, 4), 16);
   const b = parseInt(h.substring(4, 6), 16);
   return `rgba(${r}, ${g}, ${b}, ${alpha})`;
+}
+
+function useCountUp(target, duration = 600) {
+  const [value, setValue] = useState(target);
+  const prevRef = useRef(target);
+
+  useEffect(() => {
+    const start = prevRef.current;
+    const end = target;
+    if (start === end) return;
+    const startTime = performance.now();
+
+    let raf;
+    const tick = (now) => {
+      const progress = Math.min((now - startTime) / duration, 1);
+      const eased = 1 - Math.pow(1 - progress, 3); // ease-out cubic
+      setValue(Math.round(start + (end - start) * eased));
+      if (progress < 1) raf = requestAnimationFrame(tick);
+      else prevRef.current = end;
+    };
+    raf = requestAnimationFrame(tick);
+    return () => cancelAnimationFrame(raf);
+  }, [target, duration]);
+
+  return value;
 }
 
 function initials(name) {
@@ -122,6 +220,9 @@ function mapRow(row) {
     delivery_status: row.delivery_status || "",
     delivery_error_code: row.delivery_error_code || "",
     delivery_error_message: row.delivery_error_message || "",
+    escalated_at: row.escalated_at || null,
+    last_message_after_escalation_at: row.last_message_after_escalation_at || null,
+    conversation_history: row.conversation_history || [],
   };
 }
 
@@ -231,7 +332,25 @@ function usePipelineData() {
     };
   }, [fetchAll]);
 
-  return { candidates, connection, lastSyncedAt, refresh: fetchAll, justMoved, addCandidates };
+  const markReviewed = useCallback(async (candidateId) => {
+    const { data, error } = await supabase
+      .from("candidates")
+      .update({ last_message_after_escalation_at: null })
+      .eq("id", candidateId)
+      .select();
+    if (error) {
+      // eslint-disable-next-line no-console
+      console.error("Failed to mark candidate as reviewed:", error);
+      return false;
+    }
+    if (data && data[0]) {
+      const mapped = mapRow(data[0]);
+      setCandidates((prev) => prev.map((c) => (c.id === candidateId ? mapped : c)));
+    }
+    return true;
+  }, []);
+
+  return { candidates, connection, lastSyncedAt, refresh: fetchAll, justMoved, addCandidates, markReviewed };
 }
 
 // ---------------------------------------------------------------------------
@@ -323,6 +442,11 @@ function StatusChip({ status }) {
 function CandidateCard({ candidate, highlighted, onOpen }) {
   const status = STATUS_MAP[candidate.status] || STATUSES[0];
   const isEscalated = candidate.status === "escalated";
+  // True if the candidate messaged again after being escalated -- means
+  // there's activity a human hasn't seen yet, since the bot intentionally
+  // stays silent once escalated (see agent/llm_layer.py's short-circuit).
+  const hasNewMessageSinceEscalation =
+    isEscalated && candidate.last_message_after_escalation_at;
 
   return (
     <button
@@ -363,6 +487,15 @@ function CandidateCard({ candidate, highlighted, onOpen }) {
             </div>
           </div>
         </div>
+        {hasNewMessageSinceEscalation && (
+          <span
+            className="shrink-0 rounded-full px-1.5 py-0.5 text-[10px] font-semibold"
+            style={{ background: "#FB5D74", color: "#ffffff" }}
+            title="Candidate messaged again after escalation -- needs human reply"
+          >
+            NEW
+          </span>
+        )}
       </div>
       <div className="mt-2.5 flex items-center justify-between font-mono text-[11px]" style={{ color: "var(--text-dim)" }}>
         <span
@@ -423,9 +556,13 @@ function Column({ status, candidates, justMoved, onOpenCandidate }) {
   );
 }
 
-function CandidateDetailModal({ candidate, onClose }) {
+function CandidateDetailModal({ candidate, onClose, onMarkReviewed }) {
   if (!candidate) return null;
   const status = STATUS_MAP[candidate.status] || STATUSES[0];
+  const hasNewMessageSinceEscalation =
+    candidate.status === "escalated" && candidate.last_message_after_escalation_at;
+  const likelihood = computeSchedulingLikelihood(candidate);
+  const likelihoodColor = likelihood.score >= 70 ? "#34D399" : likelihood.score >= 40 ? "#FFB020" : "#6B7290";
 
   const Field = ({ label, value }) => (
     <div className="flex justify-between gap-4">
@@ -469,6 +606,20 @@ function CandidateDetailModal({ candidate, onClose }) {
           </button>
         </div>
 
+        <div className="mt-4 flex items-center justify-between gap-3 rounded-lg p-3" style={{ background: hexToRgba(likelihoodColor, 0.1), border: `1px solid ${hexToRgba(likelihoodColor, 0.3)}` }}>
+          <div>
+            <div className="font-mono text-xs uppercase tracking-wide" style={{ color: "var(--text-dim)" }}>
+              Interview scheduling likelihood
+            </div>
+            <div className="mt-0.5 font-mono text-[11px]" style={{ color: "var(--text-mid)" }}>
+              {likelihood.factors.map((f) => f.label).join(" · ")}
+            </div>
+          </div>
+          <div className="font-display text-2xl font-semibold" style={{ color: likelihoodColor }}>
+            {likelihood.score}%
+          </div>
+        </div>
+
         <div className="mt-4 flex flex-wrap items-center gap-2">
           <StatusChip status={candidate.status} />
           <span
@@ -481,6 +632,24 @@ function CandidateDetailModal({ candidate, onClose }) {
             last activity {timeAgo(candidate.last_activity_at)}
           </span>
         </div>
+
+        {hasNewMessageSinceEscalation && (
+          <div className="mt-4 flex items-center justify-between gap-3 rounded-lg p-3" style={{ background: hexToRgba("#FB5D74", 0.1), border: "1px solid rgba(251,93,116,0.3)" }}>
+            <span className="text-sm font-medium" style={{ color: "#FB5D74" }}>
+              New message since escalation -- needs a human reply
+            </span>
+            <button
+              onClick={async () => {
+                const ok = await onMarkReviewed(candidate.id);
+                if (ok) onClose();
+              }}
+              className="shrink-0 rounded-md px-3 py-1.5 text-xs font-medium transition-opacity hover:opacity-90"
+              style={{ background: "#FB5D74", color: "#ffffff" }}
+            >
+              Mark as reviewed
+            </button>
+          </div>
+        )}
 
         {candidate.status === "escalated" && candidate.escalation_reason && (
           <div
@@ -694,26 +863,35 @@ function RecruiterSummaryView({ candidates, onOpenCandidate }) {
 // OVERVIEW VIEW -- messaging stats, response rate, per-role breakdown, and
 // a timeline of messages sent over the last 7 days.
 // ---------------------------------------------------------------------------
-function StatCard({ label, value, sublabel, color, icon: Icon }) {
+function StatCard({ label, value, sublabel, color, onClick, active }) {
+  const isAnimatable = typeof value === "number";
+  const animated = useCountUp(isAnimatable ? value : 0);
+  const displayValue = isAnimatable ? animated : value;
+
   return (
-    <div
-      className="group rounded-xl p-4 transition-all duration-300 hover:-translate-y-0.5"
+    <button
+      onClick={onClick}
+      className="group w-full rounded-xl p-4 text-left transition-all duration-300 hover:-translate-y-0.5 hover:shadow-lg active:scale-[0.98]"
       style={{
         background: "var(--surface)",
-        border: "1px solid var(--line)",
-        boxShadow: "0 1px 2px rgba(0,0,0,0.3)",
+        border: active ? `1px solid ${color || "var(--signal)"}` : "1px solid var(--line)",
+        boxShadow: active ? `0 0 0 3px ${hexToRgba(color || "#0891B2", 0.15)}` : "0 1px 2px rgba(0,0,0,0.3)",
       }}
     >
       <div className="font-mono text-xs uppercase tracking-wide" style={{ color: "var(--text-dim)" }}>{label}</div>
       <div className="mt-2 font-display text-2xl font-semibold" style={{ color: color || "var(--text-hi)" }}>
-        {value}
+        {displayValue}
       </div>
       {sublabel && <div className="mt-1 text-xs" style={{ color: "var(--text-mid)" }}>{sublabel}</div>}
-    </div>
+    </button>
   );
 }
 
 function OverviewView({ candidates }) {
+  const [selectedDay, setSelectedDay] = useState(null);
+  const [selectedRole, setSelectedRole] = useState(null);
+  const [selectedStat, setSelectedStat] = useState(null);
+
   const stats = useMemo(() => {
     const outreachSent = candidates.filter((c) => c.first_outreach_sent_at).length;
     const followup1Sent = candidates.filter((c) => c.followup_1_sent_at).length;
@@ -770,15 +948,97 @@ function OverviewView({ candidates }) {
     return days;
   }, [candidates]);
 
+  // For the day currently selected (by clicking a bar), find exactly
+  // which candidates were messaged that day and with what.
+  const selectedDayDetails = useMemo(() => {
+    if (!selectedDay) return [];
+    const entries = [];
+    candidates.forEach((c) => {
+      const checks = [
+        { iso: c.first_outreach_sent_at, label: "Initial outreach" },
+        { iso: c.followup_1_sent_at, label: "Follow-up 1" },
+        { iso: c.followup_2_sent_at, label: "Follow-up 2 (final)" },
+        { iso: c.interview_followup_sent_at, label: "Interview follow-up" },
+      ];
+      checks.forEach(({ iso, label }) => {
+        if (iso && iso.slice(0, 10) === selectedDay) {
+          entries.push({ name: c.name, role: c.role, type: label, id: c.id });
+        }
+      });
+    });
+    return entries;
+  }, [selectedDay, candidates]);
+
   return (
     <div>
       <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-5">
-        <StatCard label="Total messages sent" value={stats.totalMessagesSent} sublabel="outreach + all follow-ups" color="#0891B2" />
-        <StatCard label="Outreach only" value={stats.outreachSent} sublabel="initial message" color="#4C8DFF" />
-        <StatCard label="Follow-up 1" value={stats.followup1Sent} color="#9B7BFF" />
-        <StatCard label="Follow-up 2 (final)" value={stats.followup2Sent} color="#D97706" />
-        <StatCard label="Response rate" value={`${stats.responseRate}%`} sublabel={`${stats.engaged} replied · ${stats.neverResponded} silent`} color="#16A34A" />
+        <StatCard
+          label="Total messages sent" value={stats.totalMessagesSent} sublabel="outreach + all follow-ups" color="#0891B2"
+          active={selectedStat === "total"}
+          onClick={() => setSelectedStat(selectedStat === "total" ? null : "total")}
+        />
+        <StatCard
+          label="Outreach only" value={stats.outreachSent} sublabel="initial message" color="#4C8DFF"
+          active={selectedStat === "outreach"}
+          onClick={() => setSelectedStat(selectedStat === "outreach" ? null : "outreach")}
+        />
+        <StatCard
+          label="Follow-up 1" value={stats.followup1Sent} color="#9B7BFF"
+          active={selectedStat === "followup1"}
+          onClick={() => setSelectedStat(selectedStat === "followup1" ? null : "followup1")}
+        />
+        <StatCard
+          label="Follow-up 2 (final)" value={stats.followup2Sent} color="#D97706"
+          active={selectedStat === "followup2"}
+          onClick={() => setSelectedStat(selectedStat === "followup2" ? null : "followup2")}
+        />
+        <StatCard
+          label="Response rate" value={`${stats.responseRate}%`} sublabel={`${stats.engaged} replied · ${stats.neverResponded} silent`} color="#16A34A"
+          active={selectedStat === "response"}
+          onClick={() => setSelectedStat(selectedStat === "response" ? null : "response")}
+        />
       </div>
+
+      {selectedStat && (() => {
+        const filters = {
+          total: (c) => c.first_outreach_sent_at || c.followup_1_sent_at || c.followup_2_sent_at || c.interview_followup_sent_at,
+          outreach: (c) => c.first_outreach_sent_at,
+          followup1: (c) => c.followup_1_sent_at,
+          followup2: (c) => c.followup_2_sent_at,
+          response: (c) => ENGAGED_STATUSES.has(c.status),
+        };
+        const matching = candidates.filter(filters[selectedStat]);
+        return (
+          <div className="mt-3 rounded-xl p-3" style={{ background: "var(--surface-hover)", border: "1px solid var(--line)" }}>
+            <div className="flex items-center justify-between">
+              <div className="font-mono text-xs uppercase tracking-wide" style={{ color: "var(--text-dim)" }}>
+                {matching.length} candidate{matching.length === 1 ? "" : "s"}
+              </div>
+              <button
+                onClick={() => setSelectedStat(null)}
+                className="text-xs transition-colors hover:text-[var(--text-hi)]"
+                style={{ color: "var(--text-dim)" }}
+              >
+                Close ✕
+              </button>
+            </div>
+            <div className="mt-2 flex flex-wrap gap-1.5">
+              {matching.map((c) => {
+                const s = STATUS_MAP[c.status] || STATUSES[0];
+                return (
+                  <span
+                    key={c.id}
+                    className="rounded-full px-2 py-0.5 text-xs"
+                    style={{ background: hexToRgba(s.color, 0.14), color: s.color }}
+                  >
+                    {c.name} · {c.role}
+                  </span>
+                );
+              })}
+            </div>
+          </div>
+        );
+      })()}
 
       <div className="mt-5 rounded-xl p-4" style={{ background: "var(--surface)", border: "1px solid var(--line)" }}>
         <div className="font-display text-sm font-semibold" style={{ color: "var(--text-hi)" }}>
@@ -795,11 +1055,55 @@ function OverviewView({ candidates }) {
                 labelStyle={{ color: "var(--text-mid)" }}
               />
               <Legend wrapperStyle={{ fontSize: 12, color: "var(--text-mid)" }} />
-              <Bar dataKey="outreach" name="Outreach" fill="#4C8DFF" radius={[3, 3, 0, 0]} />
-              <Bar dataKey="followup" name="Follow-ups" fill="#9B7BFF" radius={[3, 3, 0, 0]} />
+              <Bar
+                dataKey="outreach"
+                name="Outreach"
+                fill="#4C8DFF"
+                radius={[3, 3, 0, 0]}
+                cursor="pointer"
+                onClick={(data) => setSelectedDay(data.key === selectedDay ? null : data.key)}
+              />
+              <Bar
+                dataKey="followup"
+                name="Follow-ups"
+                fill="#9B7BFF"
+                radius={[3, 3, 0, 0]}
+                cursor="pointer"
+                onClick={(data) => setSelectedDay(data.key === selectedDay ? null : data.key)}
+              />
             </BarChart>
           </ResponsiveContainer>
         </div>
+
+        {selectedDay && (
+          <div className="mt-4 rounded-lg p-3" style={{ background: "var(--surface-hover)", border: "1px solid var(--line)" }}>
+            <div className="flex items-center justify-between">
+              <div className="font-mono text-xs uppercase tracking-wide" style={{ color: "var(--text-dim)" }}>
+                {new Date(selectedDay).toLocaleDateString("en-IN", { weekday: "long", month: "short", day: "numeric" })}
+                {" · "}{selectedDayDetails.length} message{selectedDayDetails.length === 1 ? "" : "s"} sent
+              </div>
+              <button
+                onClick={() => setSelectedDay(null)}
+                className="text-xs transition-colors hover:text-[var(--text-hi)]"
+                style={{ color: "var(--text-dim)" }}
+              >
+                Close ✕
+              </button>
+            </div>
+            {selectedDayDetails.length === 0 ? (
+              <div className="mt-2 font-mono text-xs" style={{ color: "var(--text-dim)" }}>No messages sent this day.</div>
+            ) : (
+              <div className="mt-2 space-y-1">
+                {selectedDayDetails.map((d, i) => (
+                  <div key={i} className="flex items-center justify-between text-sm">
+                    <span style={{ color: "var(--text-hi)" }}>{d.name} <span style={{ color: "var(--text-mid)" }}>· {d.role}</span></span>
+                    <span className="font-mono text-xs" style={{ color: "var(--text-mid)" }}>{d.type}</span>
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+        )}
       </div>
 
       <div className="mt-5 overflow-x-auto rounded-xl" style={{ border: "1px solid var(--line)" }}>
@@ -818,13 +1122,39 @@ function OverviewView({ candidates }) {
           </thead>
           <tbody>
             {perRole.map((r) => (
-              <tr key={r.role} className="border-b last:border-0" style={{ borderColor: "var(--line)" }}>
-                <td className="px-3 py-2 font-medium" style={{ color: "var(--text-hi)" }}>{r.role}</td>
-                <td className="px-3 py-2 font-mono" style={{ color: "var(--text-mid)" }}>{r.total}</td>
-                <td className="px-3 py-2 font-mono" style={{ color: "var(--text-mid)" }}>{r.outreach}</td>
-                <td className="px-3 py-2 font-mono" style={{ color: "var(--text-mid)" }}>{r.engaged}</td>
-                <td className="px-3 py-2 font-mono font-medium" style={{ color: "#34D399" }}>{r.rate}%</td>
-              </tr>
+              <React.Fragment key={r.role}>
+                <tr
+                  onClick={() => setSelectedRole(r.role === selectedRole ? null : r.role)}
+                  className="cursor-pointer border-b transition-colors last:border-0 hover:bg-white/5"
+                  style={{ borderColor: "var(--line)" }}
+                >
+                  <td className="px-3 py-2 font-medium" style={{ color: "var(--text-hi)" }}>{r.role}</td>
+                  <td className="px-3 py-2 font-mono" style={{ color: "var(--text-mid)" }}>{r.total}</td>
+                  <td className="px-3 py-2 font-mono" style={{ color: "var(--text-mid)" }}>{r.outreach}</td>
+                  <td className="px-3 py-2 font-mono" style={{ color: "var(--text-mid)" }}>{r.engaged}</td>
+                  <td className="px-3 py-2 font-mono font-medium" style={{ color: "#34D399" }}>{r.rate}%</td>
+                </tr>
+                {selectedRole === r.role && (
+                  <tr style={{ background: "var(--surface-hover)" }}>
+                    <td colSpan={5} className="px-3 py-2">
+                      <div className="flex flex-wrap gap-1.5">
+                        {candidates.filter((c) => c.role === r.role).map((c) => {
+                          const s = STATUS_MAP[c.status] || STATUSES[0];
+                          return (
+                            <span
+                              key={c.id}
+                              className="rounded-full px-2 py-0.5 text-xs"
+                              style={{ background: hexToRgba(s.color, 0.14), color: s.color }}
+                            >
+                              {c.name}
+                            </span>
+                          );
+                        })}
+                      </div>
+                    </td>
+                  </tr>
+                )}
+              </React.Fragment>
             ))}
             {perRole.length === 0 && (
               <tr>
@@ -858,8 +1188,8 @@ function NoWhatsappView({ candidates, onOpenCandidate }) {
         className="mb-4 rounded-xl p-4 font-mono text-xs"
         style={{ background: "var(--surface)", border: "1px solid var(--line)", color: "var(--text-dim)" }}
       >
-        Candidates whose number couldn't be reached on WhatsApp. Detection for this isn't wired up on the
-        backend yet — every synced candidate currently defaults to "whatsapp" as their platform.
+        Candidates who couldn't actually be reached on WhatsApp -- flagged automatically via Twilio's
+        delivery status callbacks (or manually, for known account/template-level delivery blocks).
       </div>
 
       {noWhatsapp.length === 0 ? (
@@ -889,6 +1219,119 @@ function NoWhatsappView({ candidates, onOpenCandidate }) {
           ))}
         </div>
       )}
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// MESSAGES VIEW -- list of candidates with any conversation activity, and
+// a WhatsApp-style transcript of their full conversation_history when
+// selected.
+// ---------------------------------------------------------------------------
+function ChatBubble({ turn }) {
+  const isUser = turn.role === "user";
+  return (
+    <div className={`flex ${isUser ? "justify-start" : "justify-end"}`}>
+      <div
+        className="max-w-[75%] rounded-2xl px-3 py-2 text-sm"
+        style={
+          isUser
+            ? { background: "var(--surface-hover)", color: "var(--text-hi)", borderTopLeftRadius: 4 }
+            : { background: hexToRgba("#0891B2", 0.16), color: "var(--text-hi)", borderTopRightRadius: 4 }
+        }
+      >
+        {turn.content}
+      </div>
+    </div>
+  );
+}
+
+function MessagesView({ candidates, onOpenCandidate }) {
+  const withMessages = candidates.filter((c) => c.conversation_history && c.conversation_history.length > 0);
+  const [selectedId, setLocalSelectedId] = useState(withMessages[0]?.id || null);
+  const selected = withMessages.find((c) => c.id === selectedId) || withMessages[0] || null;
+
+  if (withMessages.length === 0) {
+    return (
+      <div
+        className="flex items-center justify-center rounded-xl py-12 font-mono text-sm"
+        style={{ background: "var(--surface)", border: "1px solid var(--line)", color: "var(--text-dim)" }}
+      >
+        — no conversations yet —
+      </div>
+    );
+  }
+
+  return (
+    <div className="flex gap-4" style={{ height: "600px" }}>
+      <div
+        className="thin-scroll w-72 shrink-0 overflow-y-auto rounded-xl"
+        style={{ background: "var(--surface)", border: "1px solid var(--line)" }}
+      >
+        {withMessages
+          .slice()
+          .sort((a, b) => new Date(b.last_activity_at) - new Date(a.last_activity_at))
+          .map((c) => {
+            const lastTurn = c.conversation_history[c.conversation_history.length - 1];
+            const isSelected = selected && c.id === selected.id;
+            return (
+              <button
+                key={c.id}
+                onClick={() => setLocalSelectedId(c.id)}
+                className="block w-full border-b px-3 py-2.5 text-left transition-colors hover:bg-white/5"
+                style={{
+                  borderColor: "var(--line)",
+                  background: isSelected ? "var(--surface-hover)" : "transparent",
+                }}
+              >
+                <div className="flex items-center justify-between gap-2">
+                  <span className="truncate text-sm font-medium" style={{ color: "var(--text-hi)" }}>{c.name}</span>
+                  <span className="shrink-0 font-mono text-[10px]" style={{ color: "var(--text-dim)" }}>
+                    {timeAgo(c.last_activity_at)}
+                  </span>
+                </div>
+                <div className="mt-0.5 truncate text-xs" style={{ color: "var(--text-mid)" }}>
+                  {lastTurn ? lastTurn.content : ""}
+                </div>
+              </button>
+            );
+          })}
+      </div>
+
+      <div
+        className="flex flex-1 flex-col overflow-hidden rounded-xl"
+        style={{ background: "var(--surface)", border: "1px solid var(--line)" }}
+      >
+        {selected ? (
+          <>
+            <button
+              onClick={() => onOpenCandidate(selected)}
+              className="flex shrink-0 items-center gap-2.5 border-b px-4 py-3 text-left transition-colors hover:bg-white/5"
+              style={{ borderColor: "var(--line)" }}
+            >
+              <div
+                className="flex h-8 w-8 shrink-0 items-center justify-center rounded-full text-xs font-semibold font-display"
+                style={{ background: hexToRgba(STATUS_MAP[selected.status]?.color || "#8892B0", 0.18), color: STATUS_MAP[selected.status]?.color }}
+              >
+                {initials(selected.name)}
+              </div>
+              <div className="min-w-0">
+                <div className="truncate text-sm font-medium" style={{ color: "var(--text-hi)" }}>{selected.name}</div>
+                <div className="truncate text-xs" style={{ color: "var(--text-mid)" }}>{selected.role} · {selected.phone}</div>
+              </div>
+            </button>
+            <div className="thin-scroll flex-1 space-y-2 overflow-y-auto p-4">
+              {selected.conversation_history.map((turn, i) => (
+                <ChatBubble key={i} turn={turn} />
+              ))}
+            </div>
+          </>
+        ) : (
+          <div className="flex flex-1 items-center justify-center font-mono text-sm" style={{ color: "var(--text-dim)" }}>
+            Select a conversation
+          </div>
+        )}
+      </div>
     </div>
   );
 }
@@ -1050,12 +1493,13 @@ const TABS = [
   { key: "pipeline", label: "Pipeline board", icon: KanbanSquare },
   { key: "roles", label: "By role", icon: Users },
   { key: "recruiters", label: "By recruiter", icon: UserCog },
+  { key: "messages", label: "Messages", icon: MessageSquareText },
   { key: "no-whatsapp", label: "No WhatsApp", icon: PhoneOff },
   { key: "add", label: "Add candidates", icon: UserPlus },
 ];
 
 export default function CandidatePipelineBoard() {
-  const { candidates, connection, lastSyncedAt, refresh, justMoved, addCandidates } = usePipelineData();
+  const { candidates, connection, lastSyncedAt, refresh, justMoved, addCandidates, markReviewed } = usePipelineData();
   const [selectedId, setSelectedId] = useState(null);
   const [tab, setTab] = useState("overview");
   const [clock, setClock] = useState(new Date());
@@ -1148,7 +1592,7 @@ export default function CandidatePipelineBoard() {
               <button
                 key={opt.key}
                 onClick={() => setTheme(opt.key)}
-                className="rounded-full px-2.5 py-1 text-[11px] font-medium transition-all duration-200"
+                className="rounded-full px-2.5 py-1 text-[11px] font-medium transition-all duration-200 active:scale-90"
                 style={
                   theme === opt.key
                     ? { background: "var(--signal)", color: theme === "light" ? "#ffffff" : "var(--ink)" }
@@ -1165,7 +1609,7 @@ export default function CandidatePipelineBoard() {
           <ConnectionBadge connection={connection} lastSyncedAt={lastSyncedAt} />
           <button
             onClick={refresh}
-            className="rounded-md border px-3 py-1.5 text-sm font-medium transition-colors hover:bg-white/5"
+            className="rounded-md border px-3 py-1.5 text-sm font-medium transition-all duration-150 hover:bg-white/5 active:scale-95"
             style={{ borderColor: "var(--line)", color: "var(--text-hi)" }}
           >
             Refresh
@@ -1173,7 +1617,7 @@ export default function CandidatePipelineBoard() {
           <button
             onClick={triggerSync}
             disabled={syncing}
-            className="rounded-md px-3 py-1.5 text-sm font-medium transition-opacity hover:opacity-90 disabled:opacity-50"
+            className="rounded-md px-3 py-1.5 text-sm font-medium transition-all duration-150 hover:opacity-90 hover:shadow-lg active:scale-95 disabled:opacity-50 disabled:active:scale-100"
             style={{ background: "var(--signal)", color: "var(--ink)" }}
           >
             {syncing ? "Syncing…" : "Sync & send now"}
@@ -1206,7 +1650,7 @@ export default function CandidatePipelineBoard() {
           <button
             key={t.key}
             onClick={() => setTab(t.key)}
-            className="rounded-full px-4 py-1.5 text-sm font-medium transition-all duration-300"
+            className="rounded-full px-4 py-1.5 text-sm font-medium transition-all duration-200 active:scale-90"
             style={
               tab === t.key
                 ? { background: "var(--signal)", color: "#ffffff" }
@@ -1218,6 +1662,7 @@ export default function CandidatePipelineBoard() {
         ))}
       </div>
 
+      <div key={tab} className="fade-slide-in">
       {tab === "overview" && <OverviewView candidates={candidates} />}
       {tab === "pipeline" && (
         <PipelineBoardView candidates={candidates} justMoved={justMoved} onOpenCandidate={(c) => setSelectedId(c.id)} />
@@ -1228,12 +1673,17 @@ export default function CandidatePipelineBoard() {
       {tab === "recruiters" && (
         <RecruiterSummaryView candidates={candidates} onOpenCandidate={(c) => setSelectedId(c.id)} />
       )}
+      {tab === "messages" && (
+        <MessagesView candidates={candidates} onOpenCandidate={(c) => setSelectedId(c.id)} />
+      )}
       {tab === "no-whatsapp" && (
         <NoWhatsappView candidates={candidates} onOpenCandidate={(c) => setSelectedId(c.id)} />
       )}
       {tab === "add" && <AddCandidatesView addCandidates={addCandidates} />}
 
-      <CandidateDetailModal candidate={selectedCandidate} onClose={() => setSelectedId(null)} />
+      </div>
+
+      <CandidateDetailModal candidate={selectedCandidate} onClose={() => setSelectedId(null)} onMarkReviewed={markReviewed} />
     </div>
   );
 }
