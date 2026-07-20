@@ -31,8 +31,22 @@ def test_invalid_status():
     with pytest.raises(ValueError):
         status.transition_status(1, "foobar")
 
-def test_declined_cannot_transition():
+def test_declined_can_re_engage():
+    # "declined" is not a true dead-end: a candidate who previously
+    # declined/opted out can message again and legitimately be moved
+    # forward if the LLM/rule engine decides to re-engage them (see
+    # app/status.py's ALLOWED_TRANSITIONS comment for the real incident
+    # that prompted this).
+    supabase = MockSupabase("declined")
+    status.supabase = supabase
+    result = status.transition_status(1, "qualified")
+    assert "declined" in result and "qualified" in result
+
+
+def test_declined_cannot_transition_to_nonsensical_state():
+    # Still shouldn't be able to jump to an earlier funnel stage that
+    # doesn't make sense as a "re-engagement" target.
     supabase = MockSupabase("declined")
     status.supabase = supabase
     with pytest.raises(ValueError):
-        status.transition_status(1, "qualified")
+        status.transition_status(1, "pending")

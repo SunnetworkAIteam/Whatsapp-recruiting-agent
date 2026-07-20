@@ -61,6 +61,17 @@ sleep 1
 source venv/bin/activate
 
 # ---------------------------------------------------------------------------
+# Auto catch-up: reprocess any inbound WhatsApp messages that were missed
+# or left incomplete since the last time this ran (e.g. downtime, or a
+# request interrupted mid-processing by a restart). Safe to run every
+# time -- it tracks already-processed message SIDs and skips them, so
+# it will never re-send a reply that already went out correctly.
+# ---------------------------------------------------------------------------
+echo "Running catch-up for any missed/incomplete messages..."
+python scripts/catch_up_missed_messages.py --hours 48 > logs/catchup.log 2>&1
+tail -5 logs/catchup.log
+
+# ---------------------------------------------------------------------------
 # 2. Main FastAPI app (port 8000)
 # ---------------------------------------------------------------------------
 echo "Starting main app (port 8000)..."

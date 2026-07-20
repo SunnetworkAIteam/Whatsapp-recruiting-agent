@@ -32,3 +32,4 @@ node_modules/
 .pids
 celerybeat-schedule
 logs/
+.catchup_processed_sids.json
