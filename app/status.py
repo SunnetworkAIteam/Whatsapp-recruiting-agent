@@ -35,7 +35,13 @@ ALLOWED_TRANSITIONS = {
     "replied": ["qualified", "escalated", "awaiting_interview", "declined"],
     "awaiting_interview": ["booked", "qualified", "escalated", "declined"],
     "qualified": ["booked", "declined"],
-    "escalated": ["booked", "declined"],
+    # "replied" added so a human can resume normal bot conversation
+    # after reviewing an escalation (see the dashboard's "Mark as
+    # reviewed" button) -- previously status stayed "escalated" forever,
+    # and the LLM layer permanently refuses to auto-reply to anyone in
+    # that status, so "reviewing" an escalation had no actual effect on
+    # whether the candidate could be messaged again.
+    "escalated": ["booked", "declined", "replied"],
     "booked": [],       # final state
     # "declined" is NOT a true dead-end: a candidate who previously opted
     # out or was marked declined can still message again later (e.g.
@@ -45,6 +51,164 @@ ALLOWED_TRANSITIONS = {
     # being declined and the pipeline tried to move them forward.
     "declined": ["replied", "escalated", "awaiting_interview", "qualified", "booked"],
 }
+
+
+# ---------------------------------------------------------------------------
+# Role work details -- HR-editable via the dashboard's Settings tab
+# (role_work_details table), replacing what used to be a hardcoded dict
+# in agent/pipeline.py. HR previously had no way to update these values
+# themselves and had to relay changes to an engineer for a code edit --
+# painful if they need to adjust this every 1-2 days. A small in-process
+# cache avoids hitting the database on every single outreach send.
+# ---------------------------------------------------------------------------
+from datetime import timedelta as _timedelta
+
+_role_details_cache = {"data": None, "fetched_at": None}
+_ROLE_DETAILS_CACHE_TTL = _timedelta(minutes=2)
+
+
+def get_role_work_details(role: str) -> dict:
+    """
+    Return {"work_type": ..., "hours": ...} for the given role, sourced
+    from the role_work_details table (editable by HR via the dashboard).
+    Falls back to {"work_type": "TBD", "hours": "TBD"} for any role not
+    yet configured, so an unmapped role never sends blank/broken
+    template variables.
+    """
+    global _role_details_cache
+    now = datetime.now(timezone.utc)
+    cache_stale = (
+        _role_details_cache["data"] is None
+        or _role_details_cache["fetched_at"] is None
+        or now - _role_details_cache["fetched_at"] > _ROLE_DETAILS_CACHE_TTL
+    )
+    if cache_stale:
+        if supabase is None:
+            _role_details_cache["data"] = {}
+        else:
+            result = supabase.table("role_work_details").select("*").execute()
+            # Keyed by a normalized (trimmed, lowercased) form of the role
+            # name, so a candidate's role from Sheets ingestion matches
+            # regardless of casing/whitespace differences from however HR
+            # typed it into the dashboard's Settings tab (e.g. "DevOps"
+            # from a sheet tab vs. "devops " typed with a trailing space).
+            _role_details_cache["data"] = {
+                (r["role"] or "").strip().lower(): {
+                    "work_type": r.get("work_type") or "TBD",
+                    "hours": r.get("hours") or "TBD",
+                }
+                for r in (result.data or [])
+            }
+        _role_details_cache["fetched_at"] = now
+
+    normalized_role = (role or "").strip().lower()
+    return _role_details_cache["data"].get(normalized_role, {"work_type": "TBD", "hours": "TBD"})
+
+
+def append_conversation_turn(candidate_id: str, candidate: dict, role: str, content: str) -> list:
+    """
+    Append a single turn (role='user' or 'assistant') to a candidate's
+    conversation_history and persist it. Used both for LLM-generated
+    replies (already handled elsewhere) and for automated template
+    sends (initial outreach, follow-ups) -- those previously never
+    appeared in conversation_history at all, which meant any candidate
+    who'd only received outbound messages but hadn't replied yet was
+    completely invisible in the dashboard's Messages tab.
+    """
+    history = (candidate.get("conversation_history") or []) + [{"role": role, "content": content}]
+    update_candidate_metadata(candidate_id, {"conversation_history": history})
+    return history
+
+
+def record_unmatched_message(phone: str, body: str) -> None:
+    """
+    Store an inbound WhatsApp message that didn't match any known
+    candidate record, so it's visible in the dashboard instead of being
+    silently dropped (see agent/pipeline.py's handle_candidate_reply --
+    previously this case only logged a warning and discarded the
+    message entirely).
+
+    Kept as a lightweight audit log even though unmatched numbers are
+    now also turned into real candidate records (see
+    create_candidate_for_unknown_number below) -- this table is a
+    permanent record of "someone messaged us who we had no record of",
+    independent of whatever happens to the candidate record afterward.
+    """
+    if supabase is None:
+        return
+    supabase.table("unmatched_messages").insert({"phone": phone, "body": body}).execute()
+
+
+def create_candidate_for_unknown_number(normalized_phone: str) -> dict:
+    """
+    Auto-creates a minimal candidate record for a phone number that
+    messaged the business WhatsApp number but doesn't match any existing
+    candidate. This lets the message flow through the exact same
+    pipeline as any known candidate (rule engine, LLM reply,
+    conversation_history) -- so it shows up in the dashboard's Messages
+    tab as a normal conversation, and the agent can actually reply,
+    rather than being stuck in a separate "unrecognized" dead end with
+    no response.
+
+    Uses role=None (shows as "Unspecified" in the dashboard) since we
+    genuinely don't know which role this person is interested in --
+    a human can fill this in once the conversation clarifies it.
+    """
+    if supabase is None:
+        raise RuntimeError("Supabase client not initialized")
+    now_ts = datetime.now(timezone.utc).isoformat()
+    result = (
+        supabase.table("candidates")
+        .insert({
+            "name": "Unknown",  # `name` is NOT NULL in the schema; dashboard displays phone number instead
+            "phone": normalized_phone,
+            "role": "Unspecified",
+            # "replied" (not "messaged") -- they just messaged US first,
+            # so this is genuinely an ongoing conversation, not a fresh
+            # cold-outreach candidate.
+            "status": "replied",
+            "platform": "whatsapp",
+            "source": "Inbound (unrecognized number)",
+            # Also set first_outreach_sent_at -- the rule engine (see
+            # agent/rule_engine.py) treats first_outreach_sent_at is None
+            # as "this candidate has never received outreach, send the
+            # cold JOB_OUTREACH template" regardless of status. Since
+            # this person just messaged US first, we don't owe them a
+            # cold outreach; setting this now correctly routes their
+            # message through the normal conversational LLM path instead.
+            "first_outreach_sent_at": now_ts,
+        })
+        .execute()
+    )
+    return result.data[0]
+
+
+def append_conversation_turn(candidate_id: str, candidate: dict, role: str, content: str) -> list:
+    """
+    Append a single turn (role='user' or 'assistant') to a candidate's
+    conversation_history and persist it. Used both for LLM-generated
+    replies (already handled elsewhere) and for automated template
+    sends (initial outreach, follow-ups) -- those previously never
+    appeared in conversation_history at all, which meant any candidate
+    who'd only received outbound messages but hadn't replied yet was
+    completely invisible in the dashboard's Messages tab.
+    """
+    history = (candidate.get("conversation_history") or []) + [{"role": role, "content": content}]
+    update_candidate_metadata(candidate_id, {"conversation_history": history})
+    return history
+
+
+def record_unmatched_message(phone: str, body: str) -> None:
+    """
+    Store an inbound WhatsApp message that didn't match any known
+    candidate record, so it's visible in the dashboard instead of being
+    silently dropped (see agent/pipeline.py's handle_candidate_reply --
+    previously this case only logged a warning and discarded the
+    message entirely).
+    """
+    if supabase is None:
+        return
+    supabase.table("unmatched_messages").insert({"phone": phone, "body": body}).execute()
 
 
 def transition_status(candidate_id: int, new_status: str):

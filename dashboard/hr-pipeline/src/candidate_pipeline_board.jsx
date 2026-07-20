@@ -191,9 +191,15 @@ function normalizeStatus(raw) {
 // expects. Centralizing this here means if the DB schema changes, only
 // this function needs updating.
 function mapRow(row) {
+  // For auto-created candidates from an unrecognized number (see
+  // app/status.py's create_candidate_for_unknown_number), the DB stores
+  // a placeholder name "Unknown" (name is a required/NOT NULL column) --
+  // but the dashboard shows their phone number instead, since that's
+  // more useful and identifiable than a generic "Unknown" label.
+  const displayName = (!row.name || row.name === "Unknown") ? (row.phone || "Unknown") : row.name;
   return {
     id: row.id,
-    name: row.name || "Unknown",
+    name: displayName,
     role: row.role || "—",
     source: row.source || "Sourced",
     status: normalizeStatus(row.status),
@@ -333,9 +339,14 @@ function usePipelineData() {
   }, [fetchAll]);
 
   const markReviewed = useCallback(async (candidateId) => {
+    // Also moves status from "escalated" back to "replied" -- the LLM
+    // layer permanently refuses to auto-reply to anyone still in
+    // "escalated" status, so without this, "reviewing" an escalation had
+    // no real effect: the candidate could never receive another
+    // automated message even after a human had reviewed the situation.
     const { data, error } = await supabase
       .from("candidates")
-      .update({ last_message_after_escalation_at: null })
+      .update({ last_message_after_escalation_at: null, status: "replied" })
       .eq("id", candidateId)
       .select();
     if (error) {
@@ -894,6 +905,11 @@ function OverviewView({ candidates }) {
 
   const stats = useMemo(() => {
     const outreachSent = candidates.filter((c) => c.first_outreach_sent_at).length;
+    // Distinct from "outreachSent" above (which counts anyone EVER sent
+    // outreach, even if they've since replied/progressed) -- this counts
+    // candidates who are STILL sitting at the outreach stage with no
+    // progress yet, i.e. genuinely awaiting a first response.
+    const stillAtOutreachOnly = candidates.filter((c) => c.status === "messaged").length;
     const followup1Sent = candidates.filter((c) => c.followup_1_sent_at).length;
     const followup2Sent = candidates.filter((c) => c.followup_2_sent_at).length;
     const interviewFollowupSent = candidates.filter((c) => c.interview_followup_sent_at).length;
@@ -903,7 +919,23 @@ function OverviewView({ candidates }) {
     const neverResponded = outreachSent - engaged > 0 ? outreachSent - engaged : 0;
     const responseRate = outreachSent > 0 ? Math.round((engaged / outreachSent) * 100) : 0;
 
-    return { outreachSent, followup1Sent, followup2Sent, interviewFollowupSent, totalMessagesSent, engaged, neverResponded, responseRate };
+    // Accurate sent/received counts computed directly from
+    // conversation_history, now that every send (outreach, follow-ups,
+    // template resends) and every reply properly appends a turn there --
+    // this is more complete than the timestamp-field-based
+    // totalMessagesSent above, since it also counts multi-turn LLM
+    // conversations (e.g. several back-and-forth exchanges), not just
+    // one entry per template type.
+    let messagesSent = 0;
+    let messagesReceived = 0;
+    candidates.forEach((c) => {
+      (c.conversation_history || []).forEach((turn) => {
+        if (turn.role === "assistant") messagesSent += 1;
+        else if (turn.role === "user") messagesReceived += 1;
+      });
+    });
+
+    return { outreachSent, followup1Sent, followup2Sent, interviewFollowupSent, totalMessagesSent, engaged, neverResponded, responseRate, messagesSent, messagesReceived, stillAtOutreachOnly };
   }, [candidates]);
 
   const perRole = useMemo(() => {
@@ -971,14 +1003,20 @@ function OverviewView({ candidates }) {
 
   return (
     <div>
-      <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-5">
+      <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-4">
         <StatCard
-          label="Total messages sent" value={stats.totalMessagesSent} sublabel="outreach + all follow-ups" color="#0891B2"
+          label="Messages sent" value={stats.messagesSent} sublabel="all outbound, including replies" color="#0891B2"
+        />
+        <StatCard
+          label="Messages received" value={stats.messagesReceived} sublabel="all inbound from candidates" color="#9333EA"
+        />
+        <StatCard
+          label="Total candidates" value={candidates.length} sublabel="in the pipeline" color="#0891B2"
           active={selectedStat === "total"}
           onClick={() => setSelectedStat(selectedStat === "total" ? null : "total")}
         />
         <StatCard
-          label="Outreach only" value={stats.outreachSent} sublabel="initial message" color="#4C8DFF"
+          label="Awaiting first reply" value={stats.stillAtOutreachOnly} sublabel="sent outreach, no response yet" color="#4C8DFF"
           active={selectedStat === "outreach"}
           onClick={() => setSelectedStat(selectedStat === "outreach" ? null : "outreach")}
         />
@@ -1002,7 +1040,7 @@ function OverviewView({ candidates }) {
       {selectedStat && (() => {
         const filters = {
           total: (c) => c.first_outreach_sent_at || c.followup_1_sent_at || c.followup_2_sent_at || c.interview_followup_sent_at,
-          outreach: (c) => c.first_outreach_sent_at,
+          outreach: (c) => c.status === "messaged",
           followup1: (c) => c.followup_1_sent_at,
           followup2: (c) => c.followup_2_sent_at,
           response: (c) => ENGAGED_STATUSES.has(c.status),
@@ -1247,28 +1285,57 @@ function ChatBubble({ turn }) {
 }
 
 function MessagesView({ candidates, onOpenCandidate }) {
+  const [searchQuery, setSearchQuery] = useState("");
   const withMessages = candidates.filter((c) => c.conversation_history && c.conversation_history.length > 0);
+  const filteredMessages = withMessages.filter((c) => {
+    const q = searchQuery.trim().toLowerCase();
+    if (!q) return true;
+    return (c.name || "").toLowerCase().includes(q) || (c.phone || "").includes(q);
+  });
   const [selectedId, setLocalSelectedId] = useState(withMessages[0]?.id || null);
-  const selected = withMessages.find((c) => c.id === selectedId) || withMessages[0] || null;
+  const selected = filteredMessages.find((c) => c.id === selectedId) || filteredMessages[0] || null;
+
+  // NOTE: messages from previously-unrecognized numbers no longer need
+  // a special banner here -- they now auto-create a real candidate
+  // record (see app/status.py's create_candidate_for_unknown_number)
+  // and flow through the exact same conversation UI as everyone else.
+  // record_unmatched_message() still runs as a lightweight backend audit
+  // log, just not surfaced as separate UI here anymore.
+  const UnmatchedSection = null;
 
   if (withMessages.length === 0) {
     return (
-      <div
-        className="flex items-center justify-center rounded-xl py-12 font-mono text-sm"
-        style={{ background: "var(--surface)", border: "1px solid var(--line)", color: "var(--text-dim)" }}
-      >
-        — no conversations yet —
+      <div>
+        {UnmatchedSection}
+        <div
+          className="flex items-center justify-center rounded-xl py-12 font-mono text-sm"
+          style={{ background: "var(--surface)", border: "1px solid var(--line)", color: "var(--text-dim)" }}
+        >
+          — no conversations yet —
+        </div>
       </div>
     );
   }
 
   return (
-    <div className="flex gap-4" style={{ height: "600px" }}>
+    <div>
+      {UnmatchedSection}
+      <div className="flex gap-4" style={{ height: "600px" }}>
       <div
-        className="thin-scroll w-72 shrink-0 overflow-y-auto rounded-xl"
+        className="flex w-72 shrink-0 flex-col overflow-hidden rounded-xl"
         style={{ background: "var(--surface)", border: "1px solid var(--line)" }}
       >
-        {withMessages
+        <div className="border-b p-2" style={{ borderColor: "var(--line)" }}>
+          <input
+            value={searchQuery}
+            onChange={(e) => setSearchQuery(e.target.value)}
+            placeholder="Search by name or number..."
+            className={inputClass}
+            style={inputStyle}
+          />
+        </div>
+        <div className="thin-scroll flex-1 overflow-y-auto">
+        {filteredMessages
           .slice()
           .sort((a, b) => new Date(b.last_activity_at) - new Date(a.last_activity_at))
           .map((c) => {
@@ -1296,6 +1363,7 @@ function MessagesView({ candidates, onOpenCandidate }) {
               </button>
             );
           })}
+        </div>
       </div>
 
       <div
@@ -1318,6 +1386,28 @@ function MessagesView({ candidates, onOpenCandidate }) {
               <div className="min-w-0">
                 <div className="truncate text-sm font-medium" style={{ color: "var(--text-hi)" }}>{selected.name}</div>
                 <div className="truncate text-xs" style={{ color: "var(--text-mid)" }}>{selected.role} · {selected.phone}</div>
+                {selected.status === "messaged" && (
+                  selected.platform === "no_whatsapp" ? (
+                    <div className="mt-0.5 truncate text-xs font-medium" style={{ color: "#FB5D74" }}>
+                      Failed to deliver — see the No WhatsApp tab
+                    </div>
+                  ) : (
+                    <div className="mt-0.5 truncate text-xs font-medium" style={{ color: "#FFB020" }}>
+                      Delivered, no reply yet
+                    </div>
+                  )
+                )}
+                {selected.status === "messaged" && (
+                  selected.platform === "no_whatsapp" ? (
+                    <div className="mt-0.5 truncate text-xs font-medium" style={{ color: "#FB5D74" }}>
+                      Failed to deliver — see the No WhatsApp tab
+                    </div>
+                  ) : (
+                    <div className="mt-0.5 truncate text-xs font-medium" style={{ color: "#FFB020" }}>
+                      Delivered, no reply yet
+                    </div>
+                  )
+                )}
               </div>
             </button>
             <div className="thin-scroll flex-1 space-y-2 overflow-y-auto p-4">
@@ -1331,6 +1421,221 @@ function MessagesView({ candidates, onOpenCandidate }) {
             Select a conversation
           </div>
         )}
+      </div>
+      </div>
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// SETTINGS VIEW -- lets HR edit per-role work type/hours directly,
+// without needing an engineer to change code. Backs the {{3}}/{{4}}
+// placeholders in the outreach WhatsApp template (see
+// agent/pipeline.py's _build_job_outreach_variables and
+// app/status.py's get_role_work_details).
+// ---------------------------------------------------------------------------
+function SettingsView({ candidates }) {
+  const [details, setDetails] = useState({});
+  const [loading, setLoading] = useState(true);
+  const [saving, setSaving] = useState({});
+  const [savedFlash, setSavedFlash] = useState({});
+  const [newRoleName, setNewRoleName] = useState("");
+  const [newRoleMessage, setNewRoleMessage] = useState("");
+
+  // Roles come from BOTH existing candidates AND whatever's already saved
+  // in role_work_details -- this second source matters because it lets HR
+  // proactively add a brand-new role's details (via "+ Add new role"
+  // below) BEFORE any candidate for that role has synced in yet, rather
+  // than only being able to react after the first candidate arrives with
+  // "TBD" placeholders.
+  const roles = Array.from(
+    new Set([...candidates.map((c) => c.role), ...Object.keys(details)])
+  ).filter(Boolean).sort();
+
+  const addNewRole = () => {
+    const trimmed = newRoleName.trim();
+    if (!trimmed) return;
+    if (details[trimmed]) {
+      setNewRoleMessage(`"${trimmed}" already exists below.`);
+      window.setTimeout(() => setNewRoleMessage(""), 2500);
+      return;
+    }
+    setDetails((prev) => ({ ...prev, [trimmed]: { work_type: "", hours: "" } }));
+    setNewRoleName("");
+  };
+
+  useEffect(() => {
+    (async () => {
+      const { data, error } = await supabase.from("role_work_details").select("*");
+      if (!error && data) {
+        const map = {};
+        data.forEach((r) => {
+          map[r.role] = { work_type: r.work_type || "", hours: r.hours || "" };
+        });
+        setDetails(map);
+      }
+      setLoading(false);
+    })();
+  }, []);
+
+  const updateField = (role, field, value) => {
+    setDetails((prev) => ({
+      ...prev,
+      [role]: { ...(prev[role] || { work_type: "", hours: "" }), [field]: value },
+    }));
+  };
+
+  const saveRole = async (role) => {
+    setSaving((prev) => ({ ...prev, [role]: true }));
+    const row = details[role] || { work_type: "", hours: "" };
+    const { error } = await supabase
+      .from("role_work_details")
+      .upsert({ role, work_type: row.work_type, hours: row.hours, updated_at: new Date().toISOString() });
+    setSaving((prev) => ({ ...prev, [role]: false }));
+    if (!error) {
+      setSavedFlash((prev) => ({ ...prev, [role]: true }));
+      window.setTimeout(() => setSavedFlash((prev) => ({ ...prev, [role]: false })), 2000);
+    } else {
+      // eslint-disable-next-line no-console
+      console.error("Failed to save role work details:", error);
+    }
+  };
+
+  if (loading) {
+    return (
+      <div className="flex items-center justify-center rounded-xl py-12 font-mono text-sm" style={{ background: "var(--surface)", border: "1px solid var(--line)", color: "var(--text-dim)" }}>
+        Loading...
+      </div>
+    );
+  }
+
+  return (
+    <div>
+      <div
+        className="mb-4 rounded-xl p-4"
+        style={{ background: hexToRgba("#0891B2", 0.08), border: "1px solid rgba(8,145,178,0.25)" }}
+      >
+        <div className="font-mono text-xs font-semibold uppercase tracking-wide" style={{ color: "#0891B2" }}>Example</div>
+        <div className="mt-2 grid grid-cols-1 gap-2 sm:grid-cols-3">
+          <div>
+            <div className="text-xs" style={{ color: "var(--text-dim)" }}>Role</div>
+            <div className="text-sm font-medium" style={{ color: "var(--text-hi)" }}>NOC</div>
+          </div>
+          <div>
+            <div className="text-xs" style={{ color: "var(--text-dim)" }}>Work Type</div>
+            <div className="text-sm font-medium" style={{ color: "var(--text-hi)" }}>Remote</div>
+          </div>
+          <div>
+            <div className="text-xs" style={{ color: "var(--text-dim)" }}>Hours</div>
+            <div className="text-sm font-medium" style={{ color: "var(--text-hi)" }}>24x7 rotational shifts</div>
+          </div>
+        </div>
+        <div className="mt-2 text-xs" style={{ color: "var(--text-mid)" }}>
+          This is what candidates in this role will see in their first WhatsApp message. Fill in each role below, then click Save.
+        </div>
+      </div>
+
+      {(() => {
+        const unconfigured = roles.filter((role) => {
+          const row = details[role] || { work_type: "", hours: "" };
+          return !row.work_type.trim() || !row.hours.trim();
+        });
+        if (unconfigured.length === 0) return null;
+        return (
+          <div
+            className="mb-4 rounded-xl p-3"
+            style={{ background: hexToRgba("#FFB020", 0.1), border: "1px solid rgba(255,176,32,0.3)" }}
+          >
+            <div className="font-mono text-xs font-semibold uppercase tracking-wide" style={{ color: "#D97706" }}>
+              Not yet configured -- candidates in these roles will see "TBD"
+            </div>
+            <div className="mt-1 text-sm" style={{ color: "var(--text-hi)" }}>
+              {unconfigured.join(", ")}
+            </div>
+          </div>
+        );
+      })()}
+
+      <div className="mb-4 flex flex-wrap items-center gap-2">
+        <input
+          value={newRoleName}
+          onChange={(e) => setNewRoleName(e.target.value)}
+          onKeyDown={(e) => e.key === "Enter" && addNewRole()}
+          placeholder="New role name, e.g. DevOps Engineer"
+          className={inputClass}
+          style={{ ...inputStyle, maxWidth: "280px" }}
+        />
+        <button
+          onClick={addNewRole}
+          className="rounded-md px-3 py-1.5 text-sm font-medium transition-all duration-150 hover:opacity-90 active:scale-95"
+          style={{ background: "var(--signal)", color: "#ffffff" }}
+        >
+          + Add new role
+        </button>
+        {newRoleMessage && (
+          <span className="font-mono text-xs" style={{ color: "var(--text-dim)" }}>{newRoleMessage}</span>
+        )}
+      </div>
+
+      <div className="overflow-x-auto rounded-xl" style={{ border: "1px solid var(--line)" }}>
+        <table className="w-full min-w-[700px] border-collapse text-sm">
+          <thead>
+            <tr
+              className="border-b text-left font-mono text-xs font-medium uppercase tracking-wide"
+              style={{ borderColor: "var(--line)", background: "var(--surface)", color: "var(--text-dim)" }}
+            >
+              <th className="px-3 py-2">Role</th>
+              <th className="px-3 py-2">Work Type</th>
+              <th className="px-3 py-2">Hours</th>
+              <th className="px-3 py-2"></th>
+            </tr>
+          </thead>
+          <tbody>
+            {roles.map((role) => {
+              const row = details[role] || { work_type: "", hours: "" };
+              return (
+                <tr key={role} className="border-b last:border-0" style={{ borderColor: "var(--line)" }}>
+                  <td className="px-3 py-2 font-medium" style={{ color: "var(--text-hi)" }}>{role}</td>
+                  <td className="px-1.5 py-1.5">
+                    <input
+                      value={row.work_type}
+                      onChange={(e) => updateField(role, "work_type", e.target.value)}
+                      placeholder="e.g. Remote / Onsite / Hybrid"
+                      className={inputClass}
+                      style={inputStyle}
+                    />
+                  </td>
+                  <td className="px-1.5 py-1.5">
+                    <input
+                      value={row.hours}
+                      onChange={(e) => updateField(role, "hours", e.target.value)}
+                      placeholder="e.g. 9 AM - 6 PM IST"
+                      className={inputClass}
+                      style={inputStyle}
+                    />
+                  </td>
+                  <td className="px-1.5 py-1.5 text-right">
+                    <button
+                      onClick={() => saveRole(role)}
+                      disabled={saving[role]}
+                      className="rounded-md px-3 py-1.5 text-xs font-medium transition-all duration-150 hover:opacity-90 active:scale-95 disabled:opacity-50"
+                      style={{ background: savedFlash[role] ? "#16A34A" : "var(--signal)", color: "#ffffff" }}
+                    >
+                      {saving[role] ? "Saving..." : savedFlash[role] ? "Saved ✓" : "Save"}
+                    </button>
+                  </td>
+                </tr>
+              );
+            })}
+            {roles.length === 0 && (
+              <tr>
+                <td colSpan={4} className="px-3 py-6 text-center font-mono text-xs" style={{ color: "var(--text-dim)" }}>
+                  No roles found yet -- add candidates first.
+                </td>
+              </tr>
+            )}
+          </tbody>
+        </table>
       </div>
     </div>
   );
@@ -1496,6 +1801,7 @@ const TABS = [
   { key: "messages", label: "Messages", icon: MessageSquareText },
   { key: "no-whatsapp", label: "No WhatsApp", icon: PhoneOff },
   { key: "add", label: "Add candidates", icon: UserPlus },
+  { key: "settings", label: "Settings" },
 ];
 
 export default function CandidatePipelineBoard() {
@@ -1680,6 +1986,7 @@ export default function CandidatePipelineBoard() {
         <NoWhatsappView candidates={candidates} onOpenCandidate={(c) => setSelectedId(c.id)} />
       )}
       {tab === "add" && <AddCandidatesView addCandidates={addCandidates} />}
+      {tab === "settings" && <SettingsView candidates={candidates} />}
 
       </div>
 
