@@ -37,7 +37,13 @@ ALLOWED_TRANSITIONS = {
     "qualified": ["booked", "declined"],
     "escalated": ["booked", "declined"],
     "booked": [],       # final state
-    "declined": []      # final state
+    # "declined" is NOT a true dead-end: a candidate who previously opted
+    # out or was marked declined can still message again later (e.g.
+    # having reconsidered), and the LLM/rule engine may legitimately
+    # decide to re-engage them. Blocking every transition out of
+    # "declined" caused a real crash when a candidate replied after
+    # being declined and the pipeline tried to move them forward.
+    "declined": ["replied", "escalated", "awaiting_interview", "qualified", "booked"],
 }
 
 
