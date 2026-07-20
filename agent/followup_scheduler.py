@@ -139,6 +139,21 @@ def _is_track_b_eligible(candidate: dict, now_utc: datetime) -> bool:
 # Main entry point
 # ---------------------------------------------------------------------------
 
+def _record_followup_sent(candidate, candidate_id, timestamp_field, now_utc, label, name, role):
+    """
+    Persists the followup timestamp AND appends a clearly-labeled entry
+    to conversation_history, so this send shows up in the dashboard's
+    Messages tab even before the candidate replies. The exact approved
+    wording of these templates isn't reproduced here (only the initial
+    JOB_OUTREACH template's exact text is known/reconstructed, in
+    app/tasks.py) -- labeling honestly as "[<label> sent]" avoids
+    presenting fabricated text as if it were the real message.
+    """
+    label_text = f"[{label} sent to {name or 'candidate'} for {role or 'this role'}]"
+    history = (candidate.get("conversation_history") or []) + [{"role": "assistant", "content": label_text}]
+    update_candidate_metadata(candidate_id, {timestamp_field: now_utc, "conversation_history": history})
+
+
 def run_followup_cycle() -> dict:
     """
     Main entry point, intended to be invoked by a Celery Beat schedule
@@ -180,7 +195,7 @@ def run_followup_cycle() -> dict:
                         message_type="TRACK_A_NO_REPLY",
                         status_callback=STATUS_CALLBACK_URL,
                     )
-                    update_candidate_metadata(candidate_id, {"followup_1_sent_at": now_utc})
+                    _record_followup_sent(candidate, candidate_id, "followup_1_sent_at", now_utc, "No-reply follow-up", candidate.get("name"), candidate.get("role"))
                     logger.info(
                         "Track A: sent no-reply template to candidate %s (twilio_sid=%s)",
                         candidate_id, twilio_sid,
@@ -196,7 +211,7 @@ def run_followup_cycle() -> dict:
                         message_type="TRACK_A_FINAL_REMINDER",
                         status_callback=STATUS_CALLBACK_URL,
                     )
-                    update_candidate_metadata(candidate_id, {"followup_2_sent_at": now_utc})
+                    _record_followup_sent(candidate, candidate_id, "followup_2_sent_at", now_utc, "Final reminder", candidate.get("name"), candidate.get("role"))
                     logger.info(
                         "Track A: sent final reminder to candidate %s (twilio_sid=%s)",
                         candidate_id, twilio_sid,
@@ -212,7 +227,7 @@ def run_followup_cycle() -> dict:
                     message_type="TRACK_B_INTERVIEW_FOLLOW_UP",
                     status_callback=STATUS_CALLBACK_URL,
                 )
-                update_candidate_metadata(candidate_id, {"interview_followup_sent_at": now_utc})
+                _record_followup_sent(candidate, candidate_id, "interview_followup_sent_at", now_utc, "Interview follow-up", candidate.get("name"), candidate.get("role"))
                 logger.info(
                     "Track B: sent interview follow-up to candidate %s (twilio_sid=%s)",
                     candidate_id, twilio_sid,

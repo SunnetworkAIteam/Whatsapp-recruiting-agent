@@ -21,7 +21,7 @@ from supabase import create_client
 
 from app.celery_app import celery_app
 from app.phone_utils import to_e164_india
-from agent.pipeline import ROLE_WORK_DETAILS, _build_job_outreach_variables
+from agent.pipeline import _build_job_outreach_variables
 from agent.send_functions import send_template_message, MessagingConfigError, MessageSendError
 
 load_dotenv()
@@ -75,10 +75,27 @@ def send_candidate(self, candidate_id: str):
         raise self.retry(exc=exc, countdown=2 ** self.request.retries)
 
     now_ts = datetime.now(timezone.utc).isoformat()
+
+    # Reconstruct the actual approved template text (this is the exact
+    # candidate_outreach_utility body -- see the Utility template
+    # submitted to Meta) with real variables filled in, so this send
+    # shows up in the dashboard's Messages tab even before the candidate
+    # ever replies. Previously, only LLM-generated replies got added to
+    # conversation_history, so anyone who'd only received outreach but
+    # hadn't replied yet was invisible there.
+    sent_text = (
+        f"Hi {template_variables['1']}, this is Nisha from Amerisource Solutions Pvt. Ltd. "
+        f"regarding your application status for the {template_variables['2']} role. "
+        f"This is a {template_variables['3']} position with {template_variables['4']} working hours. "
+        f"Please reply to this message to continue with your application. Thank you!"
+    )
+    history = (candidate.get("conversation_history") or []) + [{"role": "assistant", "content": sent_text}]
+
     supabase.table("candidates").update({
         "status": "messaged",
         "first_outreach_sent_at": now_ts,
         "last_template_sent_at": now_ts,
+        "conversation_history": history,
     }).eq("id", candidate_id).execute()
 
     return f"Candidate {candidate_id} sent successfully (twilio_sid={twilio_sid})"

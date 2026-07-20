@@ -33,7 +33,10 @@ from app.status import (
     get_candidate_by_phone, 
     record_inbound_message, 
     transition_status,
-    update_candidate_metadata  # Assumed implemented in app/status.py to handle metadata fields
+    update_candidate_metadata,  # Assumed implemented in app/status.py to handle metadata fields
+    get_role_work_details,
+    record_unmatched_message,
+    create_candidate_for_unknown_number,
 )
 from app.validation import normalize_phone
 
@@ -86,15 +89,13 @@ STATUS_CALLBACK_URL = os.environ.get("TWILIO_STATUS_CALLBACK_URL")
 # exactly what comes from Google Sheets ingestion (see app/google_sheets.py
 # -- each sheet name becomes the candidate's `role`).
 # ---------------------------------------------------------------------------
-ROLE_WORK_DETAILS = {
-    "NOC": {"work_type": "TBD", "hours": "TBD"},
-    "AI": {"work_type": "TBD", "hours": "TBD"},
-    "SOC": {"work_type": "TBD", "hours": "TBD"},
-}
+# NOTE: role work details now live in the role_work_details DB table,
+# editable by HR via the dashboard's Settings tab -- see
+# app/status.py's get_role_work_details(). The hardcoded dict that used
+# to be here required an engineer to edit code every time HR needed to
+# change a role's work type/hours; that's gone now.
 
-# Used for any role not found in ROLE_WORK_DETAILS above, so an unmapped
-# role doesn't send blank/broken template variables.
-DEFAULT_WORK_DETAILS = {"work_type": "TBD", "hours": "TBD"}
+
 
 
 def _build_job_outreach_variables(candidate: dict) -> dict:
@@ -105,19 +106,18 @@ def _build_job_outreach_variables(candidate: dict) -> dict:
         {{3}} = work type (Remote/Onsite/Hybrid)
         {{4}} = shift/working hours
 
-    Falls back to DEFAULT_WORK_DETAILS (currently "TBD") for any role not
-    yet configured in ROLE_WORK_DETAILS -- logs a warning so this doesn't
-    silently ship "TBD" to a real candidate without visibility.
+    Falls back to "TBD" for any role not yet configured in the
+    role_work_details table -- logs a warning so this doesn't silently
+    ship "TBD" to a real candidate without visibility.
     """
     role = candidate.get("role") or ""
-    details = ROLE_WORK_DETAILS.get(role)
-    if details is None:
+    details = get_role_work_details(role)
+    if details["work_type"] == "TBD" and details["hours"] == "TBD":
         logger.warning(
-            "No ROLE_WORK_DETAILS configured for role '%s'; using placeholder "
-            "values. Fill this in once HR confirms the work arrangement.",
+            "No role_work_details configured for role '%s'; using placeholder "
+            "values. HR can fill this in via the dashboard's Settings tab.",
             role,
         )
-        details = DEFAULT_WORK_DETAILS
 
     return {
         "1": candidate.get("name") or "there",
@@ -144,18 +144,20 @@ def handle_candidate_reply(message: TwilioInboundMessage) -> dict:
     candidate = get_candidate_by_phone(normalized_from)
 
     if candidate is None:
-        logger.warning(
-            "No candidate found for phone=%s (sid=%s); dropping message.",
+        logger.info(
+            "No candidate found for phone=%s (sid=%s); auto-creating a record "
+            "so this conversation is treated normally.",
             message.from_number,
             message.message_sid,
         )
-        return {
-            "escalated": False,
-            "status": "unknown",
-            "reply": None,
-            "reason": "No matching candidate record for this phone number.",
-        }
-
+        # Keep a permanent audit log of this...
+        record_unmatched_message(message.from_number, message.body)
+        # ...but ALSO create a real candidate record and let this message
+        # flow through the exact same pipeline as any known candidate --
+        # so it shows up as a normal conversation in the dashboard's
+        # Messages tab, and the agent can actually reply, rather than
+        # this being a dead end with no response.
+        candidate = create_candidate_for_unknown_number(normalized_from)
     candidate_id = candidate["id"]
     phone_number = message.from_number
 
@@ -173,6 +175,33 @@ def handle_candidate_reply(message: TwilioInboundMessage) -> dict:
 
     # Now safe to record the inbound message event in the database
     record_inbound_message(candidate_id)
+
+    # Global escalation check -- BEFORE the rule engine runs at all. The
+    # rule engine (agent/rule_engine.py) makes its decisions purely from
+    # CandidateState (interview_scheduled, first_outreach_sent_at, etc.)
+    # and has no awareness of the "escalated" status itself, so without
+    # this check here it could still decide to SEND_TEMPLATE (e.g. an
+    # interview follow-up) for an already-escalated candidate -- which
+    # both defeats the point of escalating (a human should be handling
+    # this, not the bot) and previously crashed outright, since
+    # "escalated" only allows a narrow set of transitions.
+    if candidate.get("status") == CandidateStatus.ESCALATED.value:
+        logger.info(
+            "Candidate %s (%s) is already escalated; skipping rule engine "
+            "and LLM entirely, logging message for human review.",
+            candidate_id, phone_number,
+        )
+        update_candidate_metadata(candidate_id, {"last_message_after_escalation_at": datetime.now(timezone.utc)})
+        return {
+            "escalated": True,
+            "status": CandidateStatus.ESCALATED.value,
+            "reply": None,
+            "reason": (
+                "Conversation is already escalated to a human. Rule engine and LLM "
+                "were not called; no auto-reply was sent. Candidate's new message "
+                "has been logged for the human reviewer."
+            ),
+        }
 
     # Run the deterministic rule engine
     rule_result = gate_message(message.body, candidate_state=state)
@@ -309,6 +338,25 @@ def handle_candidate_reply(message: TwilioInboundMessage) -> dict:
             next_status = "awaiting_interview"
         else:
             next_status = CandidateStatus.REPLIED.value
+
+        # Also append this send to conversation_history so it shows up in
+        # the dashboard's Messages tab -- this branch (SEND_TEMPLATE,
+        # triggered by the rule engine in response to something the
+        # candidate said) previously never touched conversation_history
+        # at all, same gap as the initial-outreach and follow-up-scheduler
+        # sends had before today's fixes.
+        if template_type == TemplateType.JOB_OUTREACH:
+            sent_text = (
+                f"Hi {template_variables['1']}, this is Nisha from Amerisource Solutions Pvt. Ltd. "
+                f"regarding your application status for the {template_variables['2']} role. "
+                f"This is a {template_variables['3']} position with {template_variables['4']} working hours. "
+                f"Please reply to this message to continue with your application. Thank you!"
+            )
+        else:
+            sent_text = f"[{template_type.value} template sent]"
+        meta_updates["conversation_history"] = (candidate.get("conversation_history") or []) + [
+            {"role": "assistant", "content": sent_text}
+        ]
 
         # Sync states safely through separate transition and explicit metadata updates
         transition_status(candidate_id, next_status)
