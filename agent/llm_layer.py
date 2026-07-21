@@ -75,6 +75,7 @@ class LLMResult:
     escalated: bool
     reason: str
     raw_content: str
+    candidate_name: Optional[str] = None
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
@@ -98,10 +99,15 @@ def _build_messages(
 def _call_anthropic_api(
     messages: list[dict[str, str]],
     api_key: Optional[str] = None,
+    system_prompt: Optional[str] = None,
 ) -> str:
     """
     Call the Anthropic Messages API synchronously and return the raw text
     content of the first response block.
+
+    system_prompt: overrides the module-level SYSTEM_PROMPT for this call
+        (used to append the "ask for the candidate's name" instruction
+        when we don't have one on file -- see process_message).
 
     Raises httpx.HTTPStatusError on non-2xx responses.
     """
@@ -115,7 +121,7 @@ def _call_anthropic_api(
     payload = {
         "model": ANTHROPIC_MODEL,
         "max_tokens": 512,
-        "system": SYSTEM_PROMPT,
+        "system": system_prompt or SYSTEM_PROMPT,
         "messages": messages,
     }
 
@@ -197,6 +203,7 @@ def process_message(
     conversation_history: Optional[list[dict[str, str]]] = None,
     api_key: Optional[str] = None,
     current_status: Optional[CandidateStatus] = None,
+    candidate_name: Optional[str] = None,
     _api_caller=None,
 ) -> LLMResult:
     """
@@ -226,7 +233,31 @@ def process_message(
     messages = _build_messages(candidate_message, conversation_history)
     caller = _api_caller or _call_anthropic_api
 
-    raw_content = caller(messages, api_key)
+    # If we don't have a real name for this candidate yet (e.g. they
+    # messaged in from an unrecognized number -- see
+    # app/status.py's create_candidate_for_unknown_number), instruct the
+    # LLM to ask for it before continuing the normal recruitment flow,
+    # and to report back whatever name they give in a new optional
+    # "candidate_name" JSON field, so the caller (agent/pipeline.py) can
+    # save it to the candidate's record. Without this, the bot would
+    # never learn or use their real name at all.
+    has_real_name = bool(candidate_name) and candidate_name.strip().lower() not in ("", "unknown")
+    if has_real_name:
+        effective_system_prompt = SYSTEM_PROMPT
+    else:
+        effective_system_prompt = SYSTEM_PROMPT + """
+
+## MISSING CANDIDATE NAME
+We do not have this candidate's name on file yet. Before continuing the
+normal recruitment flow (Step 1 onward), politely ask for their name
+first -- unless they already gave it earlier in this conversation. Once
+they tell you their name, include it in your JSON response as
+"candidate_name" (their name, exactly as they gave it). If you still
+don't know their name, omit "candidate_name" from the response (or set
+it to null).
+"""
+
+    raw_content = caller(messages, api_key, system_prompt=effective_system_prompt)
 
     # If first attempt returns plain text, retry once with a correction message
     try:
@@ -236,7 +267,7 @@ def process_message(
             {"role": "assistant", "content": raw_content},
             {"role": "user", "content": "Your response must be valid JSON only. No plain text. Respond again in the required JSON format."},
         ]
-        raw_content = caller(retry_messages, api_key)
+        raw_content = caller(retry_messages, api_key, system_prompt=effective_system_prompt)
         parsed = _extract_json(raw_content)
 
     reply, status, confidence, escalate = _validate_parsed(parsed)
@@ -261,6 +292,10 @@ def process_message(
     else:
         reason = f"Confidence {confidence} >= threshold {CONFIDENCE_THRESHOLD}. Safe to auto-send."
 
+    captured_name = parsed.get("candidate_name")
+    if captured_name is not None and not str(captured_name).strip():
+        captured_name = None
+
     return LLMResult(
         reply=reply,
         status=status,
@@ -269,4 +304,5 @@ def process_message(
         escalated=should_escalate,
         reason=reason,
         raw_content=raw_content,
+        candidate_name=captured_name,
     )
