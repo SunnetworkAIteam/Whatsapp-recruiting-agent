@@ -31,7 +31,7 @@ import logging
 import os
 from datetime import datetime, timedelta, timezone
 from typing import Optional
-from app.status import get_candidates_pending_followup, update_candidate_metadata, get_safe_display_name
+from app.status import get_candidates_pending_followup, update_candidate_metadata, get_safe_display_name, get_safe_role_display
 from app.phone_utils import to_e164_india
 from agent.send_functions import send_template_message, MessagingConfigError, MessageSendError
 
@@ -79,7 +79,7 @@ def _build_followup_variables(candidate: dict) -> dict:
     """
     return {
         "1": get_safe_display_name(candidate),
-        "2": candidate.get("role") or "this role",
+        "2": get_safe_role_display(candidate),
     }
 
 

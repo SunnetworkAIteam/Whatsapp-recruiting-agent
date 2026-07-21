@@ -135,6 +135,30 @@ def get_safe_display_name(candidate: dict, fallback: str = "there") -> str:
     return name
 
 
+# Same class of issue as UNASSIGNED_NAME_PLACEHOLDER above, for the role
+# field: create_candidate_for_unknown_number sets role="Unspecified" for
+# an auto-created candidate whose actual role of interest isn't known
+# yet. Since "Unspecified" is a real, non-empty string, the same
+# `candidate.get("role") or "this role"` pattern would insert it
+# literally into a template (e.g. "...for the Unspecified role...")
+# instead of falling back gracefully.
+UNSPECIFIED_ROLE_PLACEHOLDER = "Unspecified"
+
+
+def get_safe_role_display(candidate: dict, fallback: str = "this role") -> str:
+    """
+    Return a candidate's real role for use in an outbound message, or
+    `fallback` if we don't actually have one -- treating both a
+    blank/missing role AND the literal UNSPECIFIED_ROLE_PLACEHOLDER
+    ("Unspecified") as "no real role", so neither ever gets sent to the
+    candidate as if it were their actual role.
+    """
+    role = (candidate.get("role") or "").strip()
+    if not role or role.lower() == UNSPECIFIED_ROLE_PLACEHOLDER.lower():
+        return fallback
+    return role
+
+
 def append_conversation_turn(candidate_id: str, candidate: dict, role: str, content: str) -> list:
     """
     Append a single turn (role='user' or 'assistant') to a candidate's
@@ -192,7 +216,7 @@ def create_candidate_for_unknown_number(normalized_phone: str) -> dict:
         .insert({
             "name": UNASSIGNED_NAME_PLACEHOLDER,  # `name` is NOT NULL in the schema; dashboard displays phone number instead
             "phone": normalized_phone,
-            "role": "Unspecified",
+            "role": UNSPECIFIED_ROLE_PLACEHOLDER,
             # "replied" (not "messaged") -- they just messaged US first,
             # so this is genuinely an ongoing conversation, not a fresh
             # cold-outreach candidate.
