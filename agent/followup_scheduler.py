@@ -31,7 +31,7 @@ import logging
 import os
 from datetime import datetime, timedelta, timezone
 from typing import Optional
-from app.status import get_candidates_pending_followup, update_candidate_metadata
+from app.status import get_candidates_pending_followup, update_candidate_metadata, get_safe_display_name
 from app.phone_utils import to_e164_india
 from agent.send_functions import send_template_message, MessagingConfigError, MessageSendError
 
@@ -78,7 +78,7 @@ def _build_followup_variables(candidate: dict) -> dict:
     data -- this bit us once already on a live test send.
     """
     return {
-        "1": candidate.get("name") or "there",
+        "1": get_safe_display_name(candidate),
         "2": candidate.get("role") or "this role",
     }
 

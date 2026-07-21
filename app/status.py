@@ -105,6 +105,36 @@ def get_role_work_details(role: str) -> dict:
     return _role_details_cache["data"].get(normalized_role, {"work_type": "TBD", "hours": "TBD"})
 
 
+# Placeholder used when a candidate's real name isn't known yet (e.g. an
+# auto-created record for an unrecognized number -- see
+# create_candidate_for_unknown_number below). Defined ONCE here, as the
+# single source of truth for both where this placeholder is WRITTEN and
+# where it needs to be RECOGNIZED and treated as "no real name" rather
+# than a literal name to insert into an outbound message. Previously,
+# three separate call sites each used their own ad-hoc
+# `candidate.get("name") or "there"` fallback, which correctly handled a
+# blank/missing name but NOT this literal placeholder string (since
+# "Unknown" is a real, non-empty string, `"Unknown" or "there"` evaluates
+# to "Unknown") -- causing real candidates to receive messages starting
+# "Hi Unknown, this is Nisha...". Fixed once, here, rather than requiring
+# every future call site to remember to special-case this string too.
+UNASSIGNED_NAME_PLACEHOLDER = "Unknown"
+
+
+def get_safe_display_name(candidate: dict, fallback: str = "there") -> str:
+    """
+    Return a candidate's real name for use in an outbound message, or
+    `fallback` if we don't actually have one -- treating both a
+    blank/missing name AND the literal UNASSIGNED_NAME_PLACEHOLDER
+    ("Unknown") as "no real name", so neither ever gets sent to the
+    candidate as if it were their actual name.
+    """
+    name = (candidate.get("name") or "").strip()
+    if not name or name.lower() == UNASSIGNED_NAME_PLACEHOLDER.lower():
+        return fallback
+    return name
+
+
 def append_conversation_turn(candidate_id: str, candidate: dict, role: str, content: str) -> list:
     """
     Append a single turn (role='user' or 'assistant') to a candidate's
@@ -160,7 +190,7 @@ def create_candidate_for_unknown_number(normalized_phone: str) -> dict:
     result = (
         supabase.table("candidates")
         .insert({
-            "name": "Unknown",  # `name` is NOT NULL in the schema; dashboard displays phone number instead
+            "name": UNASSIGNED_NAME_PLACEHOLDER,  # `name` is NOT NULL in the schema; dashboard displays phone number instead
             "phone": normalized_phone,
             "role": "Unspecified",
             # "replied" (not "messaged") -- they just messaged US first,
