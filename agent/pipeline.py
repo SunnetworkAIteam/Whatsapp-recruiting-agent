@@ -38,6 +38,7 @@ from app.status import (
     record_unmatched_message,
     create_candidate_for_unknown_number,
     get_safe_display_name,
+    get_safe_role_display,
 )
 from app.validation import normalize_phone
 
@@ -122,7 +123,7 @@ def _build_job_outreach_variables(candidate: dict) -> dict:
 
     return {
         "1": get_safe_display_name(candidate),
-        "2": role or "this role",
+        "2": get_safe_role_display(candidate),
         "3": details["work_type"],
         "4": details["hours"],
     }
@@ -307,7 +308,7 @@ def handle_candidate_reply(message: TwilioInboundMessage) -> dict:
         else:
             template_variables = {
                 "1": get_safe_display_name(candidate),
-                "2": candidate.get("role") or "this role",
+                "2": get_safe_role_display(candidate),
             }
 
         logger.info(
