@@ -954,13 +954,40 @@ function OverviewView({ candidates }) {
     });
   }, [candidates]);
 
+  const [chartView, setChartView] = useState("7d"); // "7d" | "all"
+
   const timeline = useMemo(() => {
+    let rangeDays;
+    if (chartView === "7d") {
+      rangeDays = 6;
+    } else {
+      // "All time" -- find the earliest activity timestamp across every
+      // candidate's send events, and build one bucket per day from
+      // there to today.
+      const allTimestamps = [];
+      candidates.forEach((c) => {
+        [c.first_outreach_sent_at, c.followup_1_sent_at, c.followup_2_sent_at, c.interview_followup_sent_at]
+          .filter(Boolean)
+          .forEach((t) => allTimestamps.push(new Date(t)));
+      });
+      if (allTimestamps.length === 0) {
+        rangeDays = 6;
+      } else {
+        const earliest = new Date(Math.min(...allTimestamps));
+        const today = new Date();
+        rangeDays = Math.max(0, Math.round((today - earliest) / (1000 * 60 * 60 * 24)));
+      }
+    }
+
     const days = [];
-    for (let i = 6; i >= 0; i--) {
+    for (let i = rangeDays; i >= 0; i--) {
       const d = new Date();
       d.setDate(d.getDate() - i);
       const key = d.toISOString().slice(0, 10);
-      days.push({ key, label: d.toLocaleDateString("en-IN", { weekday: "short" }), outreach: 0, followup: 0 });
+      const label = chartView === "7d"
+        ? d.toLocaleDateString("en-IN", { weekday: "short" })
+        : d.toLocaleDateString("en-IN", { month: "short", day: "numeric" });
+      days.push({ key, label, outreach: 0, followup: 0 });
     }
     const byKey = Object.fromEntries(days.map((d) => [d.key, d]));
 
@@ -978,7 +1005,7 @@ function OverviewView({ candidates }) {
     });
 
     return days;
-  }, [candidates]);
+  }, [candidates, chartView]);
 
   // For the day currently selected (by clicking a bar), find exactly
   // which candidates were messaged that day and with what.
@@ -1079,8 +1106,26 @@ function OverviewView({ candidates }) {
       })()}
 
       <div className="mt-5 rounded-xl p-4" style={{ background: "var(--surface)", border: "1px solid var(--line)" }}>
-        <div className="font-display text-sm font-semibold" style={{ color: "var(--text-hi)" }}>
-          Messages sent, last 7 days
+        <div className="flex items-center justify-between">
+          <div className="font-display text-sm font-semibold" style={{ color: "var(--text-hi)" }}>
+            {chartView === "7d" ? "Messages sent, last 7 days" : "Messages sent, all time"}
+          </div>
+          <div className="flex gap-0.5 rounded-full p-0.5" style={{ background: "var(--surface-hover)", border: "1px solid var(--line)" }}>
+            <button
+              onClick={() => setChartView("7d")}
+              className="rounded-full px-3 py-1 text-xs font-medium transition-all duration-200"
+              style={chartView === "7d" ? { background: "var(--signal)", color: "#ffffff" } : { color: "var(--text-mid)" }}
+            >
+              Last 7 days
+            </button>
+            <button
+              onClick={() => setChartView("all")}
+              className="rounded-full px-3 py-1 text-xs font-medium transition-all duration-200"
+              style={chartView === "all" ? { background: "var(--signal)", color: "#ffffff" } : { color: "var(--text-mid)" }}
+            >
+              All time
+            </button>
+          </div>
         </div>
         <div className="mt-4 h-56">
           <ResponsiveContainer width="100%" height="100%">
@@ -1218,7 +1263,16 @@ function OverviewView({ candidates }) {
 // check during Sheets ingestion); until then, this list will stay empty.
 // ---------------------------------------------------------------------------
 function NoWhatsappView({ candidates, onOpenCandidate }) {
-  const noWhatsapp = candidates.filter((c) => c.platform !== "whatsapp");
+  // Exclude anyone genuinely engaged (replied, qualified, escalated,
+  // etc.) even if platform === "no_whatsapp" -- that flag only means
+  // ONE specific template send failed (e.g. a follow-up template still
+  // categorized as Marketing and blocked by Meta), not that the person
+  // is unreachable on WhatsApp entirely. Someone actively mid-conversation
+  // clearly CAN be reached, so showing them in a tab literally called
+  // "No WhatsApp" was misleading.
+  const noWhatsapp = candidates.filter(
+    (c) => c.platform !== "whatsapp" && !ENGAGED_STATUSES.has(c.status)
+  );
 
   return (
     <div>
@@ -1294,6 +1348,36 @@ function MessagesView({ candidates, onOpenCandidate }) {
   });
   const [selectedId, setLocalSelectedId] = useState(withMessages[0]?.id || null);
   const selected = filteredMessages.find((c) => c.id === selectedId) || filteredMessages[0] || null;
+
+  const [replyText, setReplyText] = useState("");
+  const [sending, setSending] = useState(false);
+  const [sendError, setSendError] = useState("");
+
+  const sendReply = async () => {
+    if (!replyText.trim() || !selected) return;
+    setSending(true);
+    setSendError("");
+    try {
+      const apiBase = import.meta.env.VITE_API_BASE_URL;
+      const res = await fetch(`${apiBase}/send-message`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ candidate_id: selected.id, message: replyText }),
+      });
+      const data = await res.json();
+      if (!res.ok) {
+        setSendError(data.detail || "Failed to send message.");
+      } else {
+        setReplyText("");
+      }
+    } catch (err) {
+      // eslint-disable-next-line no-console
+      console.error("Send message failed:", err);
+      setSendError("Failed to send — check that the backend server is running.");
+    } finally {
+      setSending(false);
+    }
+  };
 
   // NOTE: messages from previously-unrecognized numbers no longer need
   // a special banner here -- they now auto-create a real candidate
@@ -1414,6 +1498,32 @@ function MessagesView({ candidates, onOpenCandidate }) {
               {selected.conversation_history.map((turn, i) => (
                 <ChatBubble key={i} turn={turn} />
               ))}
+            </div>
+            <div className="border-t p-3" style={{ borderColor: "var(--line)" }}>
+              {sendError && (
+                <div className="mb-2 font-mono text-xs" style={{ color: "#FB5D74" }}>{sendError}</div>
+              )}
+              <div className="flex gap-2">
+                <input
+                  value={replyText}
+                  onChange={(e) => setReplyText(e.target.value)}
+                  onKeyDown={(e) => e.key === "Enter" && !sending && sendReply()}
+                  placeholder="Type a reply..."
+                  className={inputClass}
+                  style={inputStyle}
+                />
+                <button
+                  onClick={sendReply}
+                  disabled={sending || !replyText.trim()}
+                  className="shrink-0 rounded-md px-4 py-1.5 text-sm font-medium transition-all duration-150 hover:opacity-90 active:scale-95 disabled:opacity-50"
+                  style={{ background: "var(--signal)", color: "#ffffff" }}
+                >
+                  {sending ? "Sending..." : "Send"}
+                </button>
+              </div>
+              <div className="mt-1.5 font-mono text-[11px]" style={{ color: "var(--text-dim)" }}>
+                Only works within 24 hours of the candidate's last message (WhatsApp policy).
+              </div>
             </div>
           </>
         ) : (

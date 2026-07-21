@@ -115,20 +115,45 @@ def main():
         print("\n(dry run -- nothing was processed, state file unchanged)")
         return
 
-    print("\nProcessing...")
+    # Group consecutive not-yet-processed messages BY PHONE NUMBER into
+    # one combined message before processing. Without this, a person who
+    # sent several messages while the system was offline (e.g. "Hi",
+    # "are you there?", "hello??") would get one separate LLM call and
+    # one separate WhatsApp send PER message, all firing back-to-back
+    # within seconds of each other once the system comes back online --
+    # which looks and feels exactly like spam to the candidate, and can
+    # produce repetitive or slightly contradictory replies since each
+    # call only sees one message in isolation. Grouping means the bot
+    # sees everything they said at once and replies naturally, the same
+    # way a human would if they opened WhatsApp and saw several
+    # messages waiting.
+    from collections import defaultdict
+    by_phone = defaultdict(list)
     for m in new_inbound:
+        by_phone[m.from_].append(m)
+
+    print("\nProcessing...")
+    for phone, msgs in by_phone.items():
+        msgs.sort(key=lambda m: m.date_sent)
+        combined_body = "\n".join(m.body or "" for m in msgs)
+        representative = msgs[-1]
+
         message = TwilioInboundMessage(
-            MessageSid=m.sid,
-            From=m.from_,
-            To=m.to,
-            Body=m.body or "",
+            MessageSid=representative.sid,
+            From=phone,
+            To=representative.to,
+            Body=combined_body,
         )
         try:
             result = handle_candidate_reply(message)
-            print(f"  OK   sid={m.sid} -> {result.get('status')} ({result.get('reason', '')[:60]})")
-            processed_sids.add(m.sid)
+            print(
+                f"  OK   {phone} ({len(msgs)} message(s) grouped) -> "
+                f"{result.get('status')} ({result.get('reason', '')[:60]})"
+            )
+            for m in msgs:
+                processed_sids.add(m.sid)
         except Exception as exc:
-            print(f"  FAIL sid={m.sid} -> {exc}")
+            print(f"  FAIL {phone} ({len(msgs)} message(s) grouped) -> {exc}")
 
     _save_processed_sids(processed_sids)
     print("\nDone.")

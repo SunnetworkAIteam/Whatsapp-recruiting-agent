@@ -1,11 +1,16 @@
 import os
+from datetime import datetime, timezone
 from dotenv import load_dotenv
-from fastapi import FastAPI
+from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
+from pydantic import BaseModel
 from supabase import create_client
 from app.validation import validate_candidate, normalize_phone, is_duplicate
 from app.google_sheets import fetch_all_candidates_from_sheets
 from app.queue import enqueue_pending_candidates
+from app.status import append_conversation_turn
+from app.phone_utils import to_e164_india
+from agent.send_functions import send_text_message, is_within_reply_window, MessagingConfigError, MessageSendError
 
 load_dotenv()
 
@@ -107,3 +112,60 @@ async def trigger_sync():
         enqueue_status = f"error: {str(e)}"
 
     return {**sync_result, "enqueue_status": enqueue_status}
+
+
+class SendMessageRequest(BaseModel):
+    candidate_id: str
+    message: str
+
+
+@app.post("/send-message")
+async def send_message(payload: SendMessageRequest):
+    """
+    Lets a human (HR/recruiter) send a free-form WhatsApp message to a
+    candidate directly from the dashboard, instead of only being able to
+    watch the automated conversation. Respects WhatsApp's 24-hour
+    free-form reply window -- outside that window, only approved
+    templates can be sent, and this endpoint will correctly refuse
+    rather than silently fail or send something that Twilio would
+    reject anyway.
+    """
+    if not payload.message or not payload.message.strip():
+        raise HTTPException(status_code=400, detail="Message cannot be empty.")
+
+    result = (
+        supabase.table("candidates")
+        .select("*")
+        .eq("id", payload.candidate_id)
+        .execute()
+    )
+    if not result.data:
+        raise HTTPException(status_code=404, detail="Candidate not found.")
+    candidate = result.data[0]
+
+    last_inbound = candidate.get("last_candidate_message_at")
+    if last_inbound:
+        last_inbound_dt = datetime.fromisoformat(last_inbound.replace("Z", "+00:00"))
+        if not is_within_reply_window(last_inbound_dt):
+            raise HTTPException(
+                status_code=409,
+                detail=(
+                    "This candidate is outside WhatsApp's 24-hour free-form reply "
+                    "window. Only an approved template can be sent now, not a "
+                    "free-form message."
+                ),
+            )
+    else:
+        raise HTTPException(
+            status_code=409,
+            detail="This candidate has never replied, so no free-form reply window is open yet.",
+        )
+
+    try:
+        twilio_sid = send_text_message(to=to_e164_india(candidate["phone"]), body=payload.message)
+    except (MessagingConfigError, MessageSendError) as exc:
+        raise HTTPException(status_code=502, detail=f"Failed to send message: {exc}")
+
+    append_conversation_turn(payload.candidate_id, candidate, "assistant", payload.message)
+
+    return {"status": "sent", "twilio_message_sid": twilio_sid}

@@ -45,7 +45,7 @@ def _json_reply(reply="Sounds good!", status="replied", confidence=90, escalate=
 
 def _make_caller(raw_response):
     """Return a fake _api_caller that ignores its args and returns raw_response."""
-    def _caller(messages, api_key):
+    def _caller(messages, api_key, **kwargs):
         return raw_response
     return _caller
 
@@ -313,7 +313,7 @@ class TestRecruitmentFlow:
     def test_conversation_history_carried_through(self):
         seen_messages = {}
 
-        def caller(messages, api_key):
+        def caller(messages, api_key, **kwargs):
             seen_messages["messages"] = messages
             return _json_reply()
 
@@ -409,7 +409,7 @@ class TestEscalationScenarios:
 
 class TestAlreadyEscalatedShortCircuit:
     def test_llm_is_never_called_once_escalated(self):
-        def caller(messages, api_key):
+        def caller(messages, api_key, **kwargs):
             raise AssertionError("LLM must not be called once escalated")
 
         result = process_message(
@@ -424,7 +424,7 @@ class TestAlreadyEscalatedShortCircuit:
         result = process_message(
             "Hello???",
             current_status=CandidateStatus.ESCALATED,
-            _api_caller=lambda messages, api_key: _json_reply(),
+            _api_caller=lambda messages, api_key, **kwargs: _json_reply(),
         )
         assert result.reply == ""
 
@@ -432,7 +432,7 @@ class TestAlreadyEscalatedShortCircuit:
         result = process_message(
             "Following up",
             current_status=CandidateStatus.ESCALATED,
-            _api_caller=lambda messages, api_key: _json_reply(),
+            _api_caller=lambda messages, api_key, **kwargs: _json_reply(),
         )
         assert "already escalated" in result.reason.lower()
 
@@ -443,7 +443,7 @@ class TestAlreadyEscalatedShortCircuit:
     def test_llm_is_called_normally_for_non_escalated_status(self, status):
         calls = []
 
-        def caller(messages, api_key):
+        def caller(messages, api_key, **kwargs):
             calls.append(messages)
             return _json_reply()
 
@@ -457,7 +457,7 @@ class TestAlreadyEscalatedShortCircuit:
 
 class TestErrorHandling:
     def test_raises_on_missing_fields(self):
-        def caller(messages, api_key):
+        def caller(messages, api_key, **kwargs):
             return '{"reply": "hi", "status": "replied"}'
 
         with pytest.raises(ValueError):
@@ -469,7 +469,7 @@ class TestErrorHandling:
             process_message("Hi")
 
     def test_handles_markdown_fenced_json(self):
-        def caller(messages, api_key):
+        def caller(messages, api_key, **kwargs):
             return "```json\n" + _json_reply() + "\n```"
 
         result = process_message("Hi", _api_caller=caller)
@@ -478,7 +478,7 @@ class TestErrorHandling:
     def test_raw_content_always_stored(self):
         raw = _json_reply(reply="hello there")
 
-        def caller(messages, api_key):
+        def caller(messages, api_key, **kwargs):
             return raw
 
         result = process_message("Hi", _api_caller=caller)
@@ -487,7 +487,7 @@ class TestErrorHandling:
     def test_retries_once_on_plain_text_then_succeeds(self):
         attempts = {"count": 0}
 
-        def caller(messages, api_key):
+        def caller(messages, api_key, **kwargs):
             attempts["count"] += 1
             if attempts["count"] == 1:
                 return "Sorry, plain text oops."

@@ -293,11 +293,21 @@ def handle_candidate_reply(message: TwilioInboundMessage) -> dict:
 
         # Build template variables. Currently only JOB_OUTREACH has known
         # placeholders ({{1}} name, {{2}} role, {{3}} work type, {{4}} hours).
-        # Other template types send with no variables until their content
-        # is confirmed to need any.
-        template_variables = None
+        # NO_REPLY/FINAL_REMINDER/INTERVIEW_FOLLOW_UP use {{1}} name and
+        # {{2}} role, same as agent/followup_scheduler.py's
+        # _build_followup_variables. This branch previously left
+        # template_variables as None for those three types, which meant
+        # Twilio silently fell back to its own stored SAMPLE content for
+        # the template (e.g. a placeholder name like "Rajesh Kumar")
+        # instead of the real candidate's name -- a real, live bug that
+        # was reaching actual candidates, not just a test artifact.
         if template_type == TemplateType.JOB_OUTREACH:
             template_variables = _build_job_outreach_variables(candidate)
+        else:
+            template_variables = {
+                "1": candidate.get("name") or "there",
+                "2": candidate.get("role") or "this role",
+            }
 
         logger.info(
             "Preparing template send. Candidate ID: %s. Phone: %s. Action: %s. Type: %s. Content SID: %s. Reason: %s",
@@ -388,8 +398,18 @@ def handle_candidate_reply(message: TwilioInboundMessage) -> dict:
     result = process_message(
         candidate_message=message.body,
         conversation_history=conversation_history,
-        current_status=current_status
+        current_status=current_status,
+        candidate_name=candidate.get("name"),
     )
+
+    # If the LLM just captured a real name (e.g. this candidate came in
+    # via an unrecognized number and had no name on file, and just told
+    # us their name), save it -- so future messages, template sends, and
+    # the dashboard all use their real name instead of "Unknown"/the
+    # phone number placeholder.
+    if result.candidate_name:
+        update_candidate_metadata(candidate_id, {"name": result.candidate_name})
+        candidate["name"] = result.candidate_name
 
     if result.escalated:
         logger.info(
