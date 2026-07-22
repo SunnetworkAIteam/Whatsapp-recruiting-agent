@@ -340,4 +340,41 @@ describe("CandidatePipelineBoard", () => {
       expect(screen.getAllByText(/Priya/).length).toBeGreaterThan(0);
     });
   });
+
+  it("imports candidates from an uploaded CSV file", async () => {
+    render(<CandidatePipelineBoard />);
+    await waitFor(() => {
+      expect(screen.getByText(/4 candidates/i)).toBeInTheDocument();
+    });
+
+    fireEvent.click(screen.getByText("Add candidates"));
+
+    const csvContent = "name,phone,role\nNew CSV Candidate,9000000099,Backend";
+    const file = new File([csvContent], "candidates.csv", { type: "text/csv" });
+    const fileInput = document.querySelector('input[type="file"]');
+    fireEvent.change(fileInput, { target: { files: [file] } });
+
+    await waitFor(() => {
+      expect(screen.getByText(/imported 1 candidate/i)).toBeInTheDocument();
+    });
+  });
+
+  it("saves a role's work details in the Settings tab", async () => {
+    render(<CandidatePipelineBoard />);
+    await waitFor(() => {
+      expect(screen.getByText(/4 candidates/i)).toBeInTheDocument();
+    });
+
+    fireEvent.click(screen.getByText("Settings"));
+
+    const workTypeInputs = await screen.findAllByPlaceholderText("e.g. Remote / Onsite / Hybrid");
+    fireEvent.change(workTypeInputs[0], { target: { value: "Remote" } });
+
+    const saveButtons = screen.getAllByText("Save");
+    fireEvent.click(saveButtons[0]);
+
+    await waitFor(() => {
+      expect(screen.getByText("Saved ✓")).toBeInTheDocument();
+    });
+  });
 });
