@@ -39,6 +39,8 @@ from app.status import (
     create_candidate_for_unknown_number,
     get_safe_display_name,
     get_safe_role_display,
+    get_role_context,
+    get_app_setting,
 )
 from app.validation import normalize_phone
 
@@ -397,11 +399,17 @@ def handle_candidate_reply(message: TwilioInboundMessage) -> dict:
             pass
 
     # Call conversational AI generation layer
+    role_context = get_role_context(candidate.get("role"))
+    calendly_link = get_app_setting("calendly_link")
     result = process_message(
         candidate_message=message.body,
         conversation_history=conversation_history,
         current_status=current_status,
         candidate_name=candidate.get("name"),
+        job_description=role_context.get("job_description"),
+        company_name=role_context.get("company_name"),
+        company_website=role_context.get("company_website"),
+        calendly_link=calendly_link,
     )
 
     # If the LLM just captured a real name (e.g. this candidate came in

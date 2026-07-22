@@ -1560,6 +1560,16 @@ function SettingsView({ candidates }) {
   const [newRoleName, setNewRoleName] = useState("");
   const [newRoleMessage, setNewRoleMessage] = useState("");
 
+  // Global settings (e.g. the Calendly booking link) that apply across
+  // every role, stored in a simple key-value app_settings table --
+  // separate from role_work_details, since this isn't tied to any one
+  // role.
+  const [calendlyLink, setCalendlyLink] = useState("");
+  const [calendlySaving, setCalendlySaving] = useState(false);
+  const [calendlySavedFlash, setCalendlySavedFlash] = useState(false);
+
+  const blankRoleDetails = { work_type: "", hours: "", job_description: "", company_name: "", company_website: "" };
+
   // Roles come from BOTH existing candidates AND whatever's already saved
   // in role_work_details -- this second source matters because it lets HR
   // proactively add a brand-new role's details (via "+ Add new role"
@@ -1578,7 +1588,7 @@ function SettingsView({ candidates }) {
       window.setTimeout(() => setNewRoleMessage(""), 2500);
       return;
     }
-    setDetails((prev) => ({ ...prev, [trimmed]: { work_type: "", hours: "" } }));
+    setDetails((prev) => ({ ...prev, [trimmed]: { ...blankRoleDetails } }));
     setNewRoleName("");
   };
 
@@ -1588,10 +1598,20 @@ function SettingsView({ candidates }) {
       if (!error && data) {
         const map = {};
         data.forEach((r) => {
-          map[r.role] = { work_type: r.work_type || "", hours: r.hours || "" };
+          map[r.role] = {
+            work_type: r.work_type || "",
+            hours: r.hours || "",
+            job_description: r.job_description || "",
+            company_name: r.company_name || "",
+            company_website: r.company_website || "",
+          };
         });
         setDetails(map);
       }
+
+      const { data: settingsData } = await supabase.from("app_settings").select("*").eq("key", "calendly_link");
+      if (settingsData && settingsData[0]) setCalendlyLink(settingsData[0].value || "");
+
       setLoading(false);
     })();
   }, []);
@@ -1599,16 +1619,24 @@ function SettingsView({ candidates }) {
   const updateField = (role, field, value) => {
     setDetails((prev) => ({
       ...prev,
-      [role]: { ...(prev[role] || { work_type: "", hours: "" }), [field]: value },
+      [role]: { ...(prev[role] || blankRoleDetails), [field]: value },
     }));
   };
 
   const saveRole = async (role) => {
     setSaving((prev) => ({ ...prev, [role]: true }));
-    const row = details[role] || { work_type: "", hours: "" };
+    const row = details[role] || blankRoleDetails;
     const { error } = await supabase
       .from("role_work_details")
-      .upsert({ role, work_type: row.work_type, hours: row.hours, updated_at: new Date().toISOString() });
+      .upsert({
+        role,
+        work_type: row.work_type,
+        hours: row.hours,
+        job_description: row.job_description,
+        company_name: row.company_name,
+        company_website: row.company_website,
+        updated_at: new Date().toISOString(),
+      });
     setSaving((prev) => ({ ...prev, [role]: false }));
     if (!error) {
       setSavedFlash((prev) => ({ ...prev, [role]: true }));
@@ -1616,6 +1644,21 @@ function SettingsView({ candidates }) {
     } else {
       // eslint-disable-next-line no-console
       console.error("Failed to save role work details:", error);
+    }
+  };
+
+  const saveCalendlyLink = async () => {
+    setCalendlySaving(true);
+    const { error } = await supabase
+      .from("app_settings")
+      .upsert({ key: "calendly_link", value: calendlyLink, updated_at: new Date().toISOString() });
+    setCalendlySaving(false);
+    if (!error) {
+      setCalendlySavedFlash(true);
+      window.setTimeout(() => setCalendlySavedFlash(false), 2000);
+    } else {
+      // eslint-disable-next-line no-console
+      console.error("Failed to save Calendly link:", error);
     }
   };
 
@@ -1629,6 +1672,35 @@ function SettingsView({ candidates }) {
 
   return (
     <div>
+      <div
+        className="mb-4 rounded-xl p-4"
+        style={{ background: "var(--surface)", border: "1px solid var(--line)" }}
+      >
+        <div className="font-mono text-xs font-semibold uppercase tracking-wide" style={{ color: "var(--text-dim)" }}>
+          Interview booking link
+        </div>
+        <div className="mt-1 text-xs" style={{ color: "var(--text-mid)" }}>
+          One link, shared across every role. Sent to candidates once they're ready to schedule, so they can pick a slot themselves.
+        </div>
+        <div className="mt-2 flex gap-2">
+          <input
+            value={calendlyLink}
+            onChange={(e) => setCalendlyLink(e.target.value)}
+            placeholder="https://calendly.com/your-team/interview"
+            className={inputClass}
+            style={inputStyle}
+          />
+          <button
+            onClick={saveCalendlyLink}
+            disabled={calendlySaving}
+            className="shrink-0 rounded-md px-4 py-1.5 text-sm font-medium transition-all duration-150 hover:opacity-90 active:scale-95 disabled:opacity-50"
+            style={{ background: calendlySavedFlash ? "#16A34A" : "var(--signal)", color: "#ffffff" }}
+          >
+            {calendlySaving ? "Saving..." : calendlySavedFlash ? "Saved ✓" : "Save"}
+          </button>
+        </div>
+      </div>
+
       <div
         className="mb-4 rounded-xl p-4"
         style={{ background: hexToRgba("#0891B2", 0.08), border: "1px solid rgba(8,145,178,0.25)" }}
@@ -1649,13 +1721,13 @@ function SettingsView({ candidates }) {
           </div>
         </div>
         <div className="mt-2 text-xs" style={{ color: "var(--text-mid)" }}>
-          This is what candidates in this role will see in their first WhatsApp message. Fill in each role below, then click Save.
+          Work Type and Hours go in the first WhatsApp message. Company Name/Website and Job Description are shared naturally by the AI later in the conversation, whenever relevant (e.g. someone asks about the role or the company) -- useful since Amerisource recruits for multiple client companies, not just itself.
         </div>
       </div>
 
       {(() => {
         const unconfigured = roles.filter((role) => {
-          const row = details[role] || { work_type: "", hours: "" };
+          const row = details[role] || blankRoleDetails;
           return !row.work_type.trim() || !row.hours.trim();
         });
         if (unconfigured.length === 0) return null;
@@ -1695,65 +1767,85 @@ function SettingsView({ candidates }) {
         )}
       </div>
 
-      <div className="overflow-x-auto rounded-xl" style={{ border: "1px solid var(--line)" }}>
-        <table className="w-full min-w-[700px] border-collapse text-sm">
-          <thead>
-            <tr
-              className="border-b text-left font-mono text-xs font-medium uppercase tracking-wide"
-              style={{ borderColor: "var(--line)", background: "var(--surface)", color: "var(--text-dim)" }}
-            >
-              <th className="px-3 py-2">Role</th>
-              <th className="px-3 py-2">Work Type</th>
-              <th className="px-3 py-2">Hours</th>
-              <th className="px-3 py-2"></th>
-            </tr>
-          </thead>
-          <tbody>
-            {roles.map((role) => {
-              const row = details[role] || { work_type: "", hours: "" };
-              return (
-                <tr key={role} className="border-b last:border-0" style={{ borderColor: "var(--line)" }}>
-                  <td className="px-3 py-2 font-medium" style={{ color: "var(--text-hi)" }}>{role}</td>
-                  <td className="px-1.5 py-1.5">
-                    <input
-                      value={row.work_type}
-                      onChange={(e) => updateField(role, "work_type", e.target.value)}
-                      placeholder="e.g. Remote / Onsite / Hybrid"
-                      className={inputClass}
-                      style={inputStyle}
-                    />
-                  </td>
-                  <td className="px-1.5 py-1.5">
-                    <input
-                      value={row.hours}
-                      onChange={(e) => updateField(role, "hours", e.target.value)}
-                      placeholder="e.g. 9 AM - 6 PM IST"
-                      className={inputClass}
-                      style={inputStyle}
-                    />
-                  </td>
-                  <td className="px-1.5 py-1.5 text-right">
-                    <button
-                      onClick={() => saveRole(role)}
-                      disabled={saving[role]}
-                      className="rounded-md px-3 py-1.5 text-xs font-medium transition-all duration-150 hover:opacity-90 active:scale-95 disabled:opacity-50"
-                      style={{ background: savedFlash[role] ? "#16A34A" : "var(--signal)", color: "#ffffff" }}
-                    >
-                      {saving[role] ? "Saving..." : savedFlash[role] ? "Saved ✓" : "Save"}
-                    </button>
-                  </td>
-                </tr>
-              );
-            })}
-            {roles.length === 0 && (
-              <tr>
-                <td colSpan={4} className="px-3 py-6 text-center font-mono text-xs" style={{ color: "var(--text-dim)" }}>
-                  No roles found yet -- add candidates first.
-                </td>
-              </tr>
-            )}
-          </tbody>
-        </table>
+      <div className="space-y-3">
+        {roles.map((role) => {
+          const row = details[role] || blankRoleDetails;
+          return (
+            <div key={role} className="rounded-xl p-4" style={{ background: "var(--surface)", border: "1px solid var(--line)" }}>
+              <div className="flex items-center justify-between gap-3">
+                <div className="font-display text-sm font-semibold" style={{ color: "var(--text-hi)" }}>{role}</div>
+                <button
+                  onClick={() => saveRole(role)}
+                  disabled={saving[role]}
+                  className="shrink-0 rounded-md px-4 py-1.5 text-xs font-medium transition-all duration-150 hover:opacity-90 active:scale-95 disabled:opacity-50"
+                  style={{ background: savedFlash[role] ? "#16A34A" : "var(--signal)", color: "#ffffff" }}
+                >
+                  {saving[role] ? "Saving..." : savedFlash[role] ? "Saved ✓" : "Save"}
+                </button>
+              </div>
+
+              <div className="mt-3 grid grid-cols-1 gap-2 sm:grid-cols-2">
+                <div>
+                  <div className="mb-1 font-mono text-[11px] uppercase tracking-wide" style={{ color: "var(--text-dim)" }}>Work Type</div>
+                  <input
+                    value={row.work_type}
+                    onChange={(e) => updateField(role, "work_type", e.target.value)}
+                    placeholder="e.g. Remote / Onsite / Hybrid"
+                    className={inputClass}
+                    style={inputStyle}
+                  />
+                </div>
+                <div>
+                  <div className="mb-1 font-mono text-[11px] uppercase tracking-wide" style={{ color: "var(--text-dim)" }}>Hours</div>
+                  <input
+                    value={row.hours}
+                    onChange={(e) => updateField(role, "hours", e.target.value)}
+                    placeholder="e.g. 9 AM - 6 PM IST"
+                    className={inputClass}
+                    style={inputStyle}
+                  />
+                </div>
+                <div>
+                  <div className="mb-1 font-mono text-[11px] uppercase tracking-wide" style={{ color: "var(--text-dim)" }}>Company Name</div>
+                  <input
+                    value={row.company_name}
+                    onChange={(e) => updateField(role, "company_name", e.target.value)}
+                    placeholder="e.g. Amerisource, or a client like MGT"
+                    className={inputClass}
+                    style={inputStyle}
+                  />
+                </div>
+                <div>
+                  <div className="mb-1 font-mono text-[11px] uppercase tracking-wide" style={{ color: "var(--text-dim)" }}>Company Website</div>
+                  <input
+                    value={row.company_website}
+                    onChange={(e) => updateField(role, "company_website", e.target.value)}
+                    placeholder="https://..."
+                    className={inputClass}
+                    style={inputStyle}
+                  />
+                </div>
+              </div>
+
+              <div className="mt-2">
+                <div className="mb-1 font-mono text-[11px] uppercase tracking-wide" style={{ color: "var(--text-dim)" }}>Job Description</div>
+                <textarea
+                  value={row.job_description}
+                  onChange={(e) => updateField(role, "job_description", e.target.value)}
+                  placeholder="Short summary of the role, responsibilities, and requirements -- shared by the AI when a candidate asks for more info."
+                  rows={3}
+                  className={inputClass}
+                  style={{ ...inputStyle, resize: "vertical" }}
+                />
+              </div>
+            </div>
+          );
+        })}
+        {roles.length === 0 && (
+          <div className="rounded-xl py-6 text-center font-mono text-xs" style={{ background: "var(--surface)", border: "1px solid var(--line)", color: "var(--text-dim)" }}>
+            No roles found yet -- add candidates first.
+          </div>
+        )}
       </div>
     </div>
   );
@@ -1919,7 +2011,7 @@ const TABS = [
   { key: "messages", label: "Messages", icon: MessageSquareText },
   { key: "no-whatsapp", label: "No WhatsApp", icon: PhoneOff },
   { key: "add", label: "Add candidates", icon: UserPlus },
-  { key: "settings", label: "Settings" },
+  { key: "settings", label: "Role & Messaging Setup" },
 ];
 
 export default function CandidatePipelineBoard() {

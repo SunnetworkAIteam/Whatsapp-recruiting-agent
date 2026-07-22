@@ -204,6 +204,10 @@ def process_message(
     api_key: Optional[str] = None,
     current_status: Optional[CandidateStatus] = None,
     candidate_name: Optional[str] = None,
+    job_description: Optional[str] = None,
+    company_name: Optional[str] = None,
+    company_website: Optional[str] = None,
+    calendly_link: Optional[str] = None,
     _api_caller=None,
 ) -> LLMResult:
     """
@@ -256,6 +260,27 @@ they tell you their name, include it in your JSON response as
 don't know their name, omit "candidate_name" from the response (or set
 it to null).
 """
+
+    # Role-specific context (company, job description) and the global
+    # interview booking link, if configured -- see the Settings tab
+    # (role_work_details.job_description/company_name/company_website,
+    # and app_settings.calendly_link). This was previously silently
+    # missing entirely: the parameters existed but were never actually
+    # appended to the system prompt, so the LLM never saw this context
+    # at all despite the data being correctly fetched upstream.
+    context_lines = []
+    if company_name:
+        context_lines.append(
+            f"Client company for this role: {company_name}" + (f" ({company_website})" if company_website else "")
+        )
+    if job_description:
+        context_lines.append(f"Job description for this role:\n{job_description}")
+    if calendly_link:
+        context_lines.append(f"Interview booking link to share at Step 6: {calendly_link}")
+
+    if context_lines:
+        effective_system_prompt += "\n\n## ROLE-SPECIFIC CONTEXT\n" + "\n\n".join(context_lines)
+
 
     raw_content = caller(messages, api_key, system_prompt=effective_system_prompt)
 
