@@ -1560,13 +1560,36 @@ function SettingsView({ candidates }) {
   const [newRoleName, setNewRoleName] = useState("");
   const [newRoleMessage, setNewRoleMessage] = useState("");
 
-  // Global settings (e.g. the Calendly booking link) that apply across
-  // every role, stored in a simple key-value app_settings table --
-  // separate from role_work_details, since this isn't tied to any one
-  // role.
-  const [calendlyLink, setCalendlyLink] = useState("");
-  const [calendlySaving, setCalendlySaving] = useState(false);
-  const [calendlySavedFlash, setCalendlySavedFlash] = useState(false);
+  // Per-recruiter Calendly links, not a single global one -- different
+  // recruiters use their own booking link, and candidates should be
+  // sent whichever recruiter they're actually assigned to (from
+  // Sheets ingestion's hiring_recruiter_name field).
+  const [recruiterLinks, setRecruiterLinks] = useState({});
+  const [recruiterLinkSaving, setRecruiterLinkSaving] = useState({});
+  const [recruiterLinkSavedFlash, setRecruiterLinkSavedFlash] = useState({});
+
+  const recruiters = Array.from(
+    new Set(candidates.map((c) => c.hiring_recruiter_name).filter(Boolean))
+  ).sort();
+
+  const updateRecruiterLink = (recruiter, value) => {
+    setRecruiterLinks((prev) => ({ ...prev, [recruiter]: value }));
+  };
+
+  const saveRecruiterLink = async (recruiter) => {
+    setRecruiterLinkSaving((prev) => ({ ...prev, [recruiter]: true }));
+    const { error } = await supabase
+      .from("recruiter_links")
+      .upsert({ recruiter_name: recruiter, calendly_link: recruiterLinks[recruiter] || "", updated_at: new Date().toISOString() });
+    setRecruiterLinkSaving((prev) => ({ ...prev, [recruiter]: false }));
+    if (!error) {
+      setRecruiterLinkSavedFlash((prev) => ({ ...prev, [recruiter]: true }));
+      window.setTimeout(() => setRecruiterLinkSavedFlash((prev) => ({ ...prev, [recruiter]: false })), 2000);
+    } else {
+      // eslint-disable-next-line no-console
+      console.error("Failed to save recruiter's Calendly link:", error);
+    }
+  };
 
   const blankRoleDetails = { work_type: "", hours: "", job_description: "", company_name: "", company_website: "" };
 
@@ -1609,8 +1632,12 @@ function SettingsView({ candidates }) {
         setDetails(map);
       }
 
-      const { data: settingsData } = await supabase.from("app_settings").select("*").eq("key", "calendly_link");
-      if (settingsData && settingsData[0]) setCalendlyLink(settingsData[0].value || "");
+      const { data: recruiterLinksData } = await supabase.from("recruiter_links").select("*");
+      if (recruiterLinksData) {
+        const map = {};
+        recruiterLinksData.forEach((r) => { map[r.recruiter_name] = r.calendly_link || ""; });
+        setRecruiterLinks(map);
+      }
 
       setLoading(false);
     })();
@@ -1647,21 +1674,6 @@ function SettingsView({ candidates }) {
     }
   };
 
-  const saveCalendlyLink = async () => {
-    setCalendlySaving(true);
-    const { error } = await supabase
-      .from("app_settings")
-      .upsert({ key: "calendly_link", value: calendlyLink, updated_at: new Date().toISOString() });
-    setCalendlySaving(false);
-    if (!error) {
-      setCalendlySavedFlash(true);
-      window.setTimeout(() => setCalendlySavedFlash(false), 2000);
-    } else {
-      // eslint-disable-next-line no-console
-      console.error("Failed to save Calendly link:", error);
-    }
-  };
-
   if (loading) {
     return (
       <div className="flex items-center justify-center rounded-xl py-12 font-mono text-sm" style={{ background: "var(--surface)", border: "1px solid var(--line)", color: "var(--text-dim)" }}>
@@ -1677,27 +1689,37 @@ function SettingsView({ candidates }) {
         style={{ background: "var(--surface)", border: "1px solid var(--line)" }}
       >
         <div className="font-mono text-xs font-semibold uppercase tracking-wide" style={{ color: "var(--text-dim)" }}>
-          Interview booking link
+          Interview booking links, by recruiter
         </div>
         <div className="mt-1 text-xs" style={{ color: "var(--text-mid)" }}>
-          One link, shared across every role. Sent to candidates once they're ready to schedule, so they can pick a slot themselves.
+          Each recruiter has their own Calendly link. Candidates are sent whichever recruiter they're actually assigned to (from the sheet's "hiring_recruiter_name" column).
         </div>
-        <div className="mt-2 flex gap-2">
-          <input
-            value={calendlyLink}
-            onChange={(e) => setCalendlyLink(e.target.value)}
-            placeholder="https://calendly.com/your-team/interview"
-            className={inputClass}
-            style={inputStyle}
-          />
-          <button
-            onClick={saveCalendlyLink}
-            disabled={calendlySaving}
-            className="shrink-0 rounded-md px-4 py-1.5 text-sm font-medium transition-all duration-150 hover:opacity-90 active:scale-95 disabled:opacity-50"
-            style={{ background: calendlySavedFlash ? "#16A34A" : "var(--signal)", color: "#ffffff" }}
-          >
-            {calendlySaving ? "Saving..." : calendlySavedFlash ? "Saved ✓" : "Save"}
-          </button>
+        <div className="mt-3 space-y-2">
+          {recruiters.map((recruiter) => (
+            <div key={recruiter} className="flex items-center gap-2">
+              <div className="w-32 shrink-0 truncate text-sm font-medium" style={{ color: "var(--text-hi)" }}>{recruiter}</div>
+              <input
+                value={recruiterLinks[recruiter] || ""}
+                onChange={(e) => updateRecruiterLink(recruiter, e.target.value)}
+                placeholder="https://calendly.com/this-recruiter/interview"
+                className={inputClass}
+                style={inputStyle}
+              />
+              <button
+                onClick={() => saveRecruiterLink(recruiter)}
+                disabled={recruiterLinkSaving[recruiter]}
+                className="shrink-0 rounded-md px-4 py-1.5 text-sm font-medium transition-all duration-150 hover:opacity-90 active:scale-95 disabled:opacity-50"
+                style={{ background: recruiterLinkSavedFlash[recruiter] ? "#16A34A" : "var(--signal)", color: "#ffffff" }}
+              >
+                {recruiterLinkSaving[recruiter] ? "Saving..." : recruiterLinkSavedFlash[recruiter] ? "Saved ✓" : "Save"}
+              </button>
+            </div>
+          ))}
+          {recruiters.length === 0 && (
+            <div className="font-mono text-xs" style={{ color: "var(--text-dim)" }}>
+              No recruiters found yet -- add candidates with a hiring_recruiter_name first.
+            </div>
+          )}
         </div>
       </div>
 
