@@ -81,6 +81,45 @@ def get_app_setting(key: str) -> Optional[str]:
     return result.data[0].get("value")
 
 
+# Per-recruiter interview booking link (replaces an earlier single
+# global link -- different recruiters use their own Calendly link, so
+# candidates need to be sent whichever recruiter they're actually
+# assigned to, via their hiring_recruiter_name field from Sheets
+# ingestion).
+_recruiter_links_cache = {"data": None, "fetched_at": None}
+_RECRUITER_LINKS_CACHE_TTL = _timedelta(minutes=2)
+
+
+def get_recruiter_calendly_link(recruiter_name: str) -> Optional[str]:
+    """
+    Return the Calendly booking link configured for a specific
+    recruiter (see the dashboard's Role & Messaging Setup tab), or None
+    if that recruiter has no link configured -- callers should simply
+    not share a link in that case, rather than falling back to any
+    generic/placeholder value.
+    """
+    global _recruiter_links_cache
+    now = datetime.now(timezone.utc)
+    cache_stale = (
+        _recruiter_links_cache["data"] is None
+        or _recruiter_links_cache["fetched_at"] is None
+        or now - _recruiter_links_cache["fetched_at"] > _RECRUITER_LINKS_CACHE_TTL
+    )
+    if cache_stale:
+        if supabase is None:
+            _recruiter_links_cache["data"] = {}
+        else:
+            result = supabase.table("recruiter_links").select("*").execute()
+            _recruiter_links_cache["data"] = {
+                (r["recruiter_name"] or "").strip().lower(): r.get("calendly_link") or None
+                for r in (result.data or [])
+            }
+        _recruiter_links_cache["fetched_at"] = now
+
+    normalized = (recruiter_name or "").strip().lower()
+    return _recruiter_links_cache["data"].get(normalized)
+
+
 def get_role_work_details(role: str) -> dict:
     """
     Return {"work_type": ..., "hours": ...} for the given role, sourced

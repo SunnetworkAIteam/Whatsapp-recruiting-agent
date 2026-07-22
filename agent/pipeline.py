@@ -40,7 +40,7 @@ from app.status import (
     get_safe_display_name,
     get_safe_role_display,
     get_role_context,
-    get_app_setting,
+    get_recruiter_calendly_link,
 )
 from app.validation import normalize_phone
 
@@ -410,7 +410,13 @@ def handle_candidate_reply(message: TwilioInboundMessage) -> dict:
 
     # Call conversational AI generation layer
     role_context = get_role_context(candidate.get("role"))
-    calendly_link = get_app_setting("calendly_link")
+    # Per-recruiter, not global -- different recruiters use their own
+    # Calendly link, so we share whichever recruiter this specific
+    # candidate is actually assigned to (from Sheets ingestion's
+    # hiring_recruiter_name field). If that recruiter has no link
+    # configured, calendly_link is simply None and the AI won't mention
+    # one, rather than falling back to some other recruiter's link.
+    calendly_link = get_recruiter_calendly_link(candidate.get("hiring_recruiter_name"))
     result = process_message(
         candidate_message=message.body,
         conversation_history=conversation_history,
