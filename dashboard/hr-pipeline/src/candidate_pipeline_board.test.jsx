@@ -207,7 +207,7 @@ describe("CandidatePipelineBoard", () => {
       expect(screen.getByText(/4 candidates/i)).toBeInTheDocument();
     });
 
-    fireEvent.click(screen.getByText("Settings"));
+    fireEvent.click(screen.getByText("Role & Messaging Setup"));
 
     await waitFor(() => {
       expect(screen.getByText(/not yet configured/i)).toBeInTheDocument();
@@ -365,7 +365,7 @@ describe("CandidatePipelineBoard", () => {
       expect(screen.getByText(/4 candidates/i)).toBeInTheDocument();
     });
 
-    fireEvent.click(screen.getByText("Settings"));
+    fireEvent.click(screen.getByText("Role & Messaging Setup"));
 
     const workTypeInputs = await screen.findAllByPlaceholderText("e.g. Remote / Onsite / Hybrid");
     fireEvent.change(workTypeInputs[0], { target: { value: "Remote" } });

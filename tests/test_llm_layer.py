@@ -82,8 +82,13 @@ class TestSystemPrompt:
         assert "HANDLING UNREALISTIC ANSWERS" in SYSTEM_PROMPT
         assert "Do NOT escalate" in SYSTEM_PROMPT
 
-    def test_qualified_only_after_slot_confirmed(self):
-        assert 'return status "qualified" after the interview slot has been confirmed' in SYSTEM_PROMPT
+    def test_qualified_only_after_booking_link_shared(self):
+        # Updated: the AI no longer negotiates specific interview time
+        # slots via text -- it shares a booking link (Calendly) and the
+        # candidate books their own slot externally. "qualified" is now
+        # reached once the link has been shared, not once a specific
+        # slot is confirmed in the chat.
+        assert 'return status "qualified" after the booking link has been shared' in SYSTEM_PROMPT
 
     def test_off_limits_topics_listed(self):
         for topic in ["Visa sponsorship", "Legal matters", "Complaints", "Serious anger"]:

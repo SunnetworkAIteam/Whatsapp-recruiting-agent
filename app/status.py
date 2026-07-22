@@ -67,6 +67,20 @@ _role_details_cache = {"data": None, "fetched_at": None}
 _ROLE_DETAILS_CACHE_TTL = _timedelta(minutes=2)
 
 
+def get_app_setting(key: str) -> Optional[str]:
+    """
+    Read a single global setting from the app_settings key-value table
+    (e.g. "calendly_link"). Returns None if not set or Supabase isn't
+    configured, so callers can gracefully skip whatever depends on it.
+    """
+    if supabase is None:
+        return None
+    result = supabase.table("app_settings").select("*").eq("key", key).execute()
+    if not result.data:
+        return None
+    return result.data[0].get("value")
+
+
 def get_role_work_details(role: str) -> dict:
     """
     Return {"work_type": ..., "hours": ...} for the given role, sourced
@@ -103,6 +117,52 @@ def get_role_work_details(role: str) -> dict:
 
     normalized_role = (role or "").strip().lower()
     return _role_details_cache["data"].get(normalized_role, {"work_type": "TBD", "hours": "TBD"})
+
+
+# Separate from get_role_work_details() above (which has an established
+# {"work_type", "hours"} contract used to build outreach/follow-up
+# template variables) -- this covers the newer, LLM-context-only fields
+# (job description, client company name/website) added for the
+# "share the JD/company naturally in conversation" feature.
+_role_context_cache = {"data": None, "fetched_at": None}
+_ROLE_CONTEXT_CACHE_TTL = _timedelta(minutes=2)
+
+
+def get_role_context(role: str) -> dict:
+    """
+    Return {"job_description": ..., "company_name": ..., "company_website": ...}
+    for the given role, or empty strings for any field not configured.
+    Unlike get_role_work_details, there's no "TBD" fallback here -- an
+    empty/missing value just means the LLM won't mention that context,
+    which is the correct behavior (no placeholder text should ever reach
+    a real conversation).
+    """
+    global _role_context_cache
+    now = datetime.now(timezone.utc)
+    cache_stale = (
+        _role_context_cache["data"] is None
+        or _role_context_cache["fetched_at"] is None
+        or now - _role_context_cache["fetched_at"] > _ROLE_CONTEXT_CACHE_TTL
+    )
+    if cache_stale:
+        if supabase is None:
+            _role_context_cache["data"] = {}
+        else:
+            result = supabase.table("role_work_details").select("*").execute()
+            _role_context_cache["data"] = {
+                (r["role"] or "").strip().lower(): {
+                    "job_description": r.get("job_description") or "",
+                    "company_name": r.get("company_name") or "",
+                    "company_website": r.get("company_website") or "",
+                }
+                for r in (result.data or [])
+            }
+        _role_context_cache["fetched_at"] = now
+
+    normalized_role = (role or "").strip().lower()
+    return _role_context_cache["data"].get(
+        normalized_role, {"job_description": "", "company_name": "", "company_website": ""}
+    )
 
 
 # Placeholder used when a candidate's real name isn't known yet (e.g. an
