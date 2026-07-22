@@ -349,7 +349,17 @@ def handle_candidate_reply(message: TwilioInboundMessage) -> dict:
             meta_updates["final_reminder_sent"] = True
             next_status = "final_reminder_sent"
         elif template_type == TemplateType.INTERVIEW_FOLLOW_UP:
-            next_status = "awaiting_interview"
+            # "awaiting_interview" is a leftover from the old text-based
+            # slot-negotiation flow. Under the new design (AI shares a
+            # Calendly link, HR handles everything after via manual
+            # Kanban drag-and-drop), the AI's own endpoint is "qualified"
+            # -- there's no separate "awaiting_interview" stage anymore.
+            # Using "awaiting_interview" here caused a real crash for any
+            # candidate already at "qualified" (transitioning backwards
+            # isn't allowed); "qualified" is safe from both "replied"
+            # (already an allowed transition) and "qualified" itself
+            # (a no-op, not an error).
+            next_status = "qualified"
         else:
             next_status = CandidateStatus.REPLIED.value
 
