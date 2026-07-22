@@ -50,19 +50,58 @@ const mockCandidates = [
     created_at: "2026-07-20T09:00:00Z",
     conversation_history: [],
   },
+  {
+    id: "4",
+    name: "Teja",
+    role: "NOC",
+    status: "escalated",
+    hiring_recruiter_name: "Usha",
+    source: "Sourced",
+    phone: "9000000004",
+    updated_at: "2026-07-20T12:00:00Z",
+    created_at: "2026-07-20T09:00:00Z",
+    conversation_history: [{ role: "user", content: "This is a joke" }],
+    last_message_after_escalation_at: "2026-07-20T12:00:00Z",
+    escalation_reason: "Serious anger detected.",
+  },
 ];
 
-function makeQueryBuilder(data) {
+function makeQueryBuilder(defaultData) {
+  // Tracks what should actually be returned when this chain resolves --
+  // starts as the table's default mock rows. insert() overrides it with
+  // the (fake-id-tagged) rows actually passed in. update()+eq() overrides
+  // it with the ORIGINAL matching row merged with the update payload --
+  // without this, .update({...}).eq("id", X).select() would incorrectly
+  // resolve with the first row of the default dataset regardless of
+  // which candidate was actually being updated, which caused a genuine
+  // duplicate React key bug (two candidates ending up with the same id
+  // in state) purely from this mock's earlier incompleteness, not from
+  // any real bug in the app.
+  let resultData = defaultData;
+  let pendingUpdatePayload = null;
   const builder = {
     select: vi.fn(() => builder),
-    insert: vi.fn(() => builder),
-    update: vi.fn(() => builder),
+    insert: vi.fn((rows) => {
+      const list = Array.isArray(rows) ? rows : [rows];
+      resultData = list.map((r, i) => ({ id: `new-${i}`, ...r }));
+      return builder;
+    }),
+    update: vi.fn((payload) => {
+      pendingUpdatePayload = payload;
+      return builder;
+    }),
     upsert: vi.fn(() => builder),
     delete: vi.fn(() => builder),
-    eq: vi.fn(() => builder),
+    eq: vi.fn((field, value) => {
+      if (pendingUpdatePayload) {
+        const original = defaultData.find((d) => String(d[field]) === String(value)) || {};
+        resultData = [{ ...original, ...pendingUpdatePayload }];
+      }
+      return builder;
+    }),
     order: vi.fn(() => builder),
     limit: vi.fn(() => builder),
-    then: (resolve) => resolve({ data, error: null }),
+    then: (resolve) => resolve({ data: resultData, error: null }),
   };
   return builder;
 }
@@ -97,7 +136,7 @@ describe("CandidatePipelineBoard", () => {
   it("renders the Overview tab by default with correct candidate count", async () => {
     render(<CandidatePipelineBoard />);
     await waitFor(() => {
-      expect(screen.getByText(/3 candidates/i)).toBeInTheDocument();
+      expect(screen.getByText(/4 candidates/i)).toBeInTheDocument();
     });
   });
 
@@ -123,7 +162,7 @@ describe("CandidatePipelineBoard", () => {
   it("switches to the Messages tab and filters candidates by search query", async () => {
     render(<CandidatePipelineBoard />);
     await waitFor(() => {
-      expect(screen.getByText(/3 candidates/i)).toBeInTheDocument();
+      expect(screen.getByText(/4 candidates/i)).toBeInTheDocument();
     });
 
     fireEvent.click(screen.getByText("Messages"));
@@ -152,7 +191,7 @@ describe("CandidatePipelineBoard", () => {
     // ENGAGED_STATUSES, so it SHOULD still appear.
     render(<CandidatePipelineBoard />);
     await waitFor(() => {
-      expect(screen.getByText(/3 candidates/i)).toBeInTheDocument();
+      expect(screen.getByText(/4 candidates/i)).toBeInTheDocument();
     });
 
     fireEvent.click(screen.getByText("No WhatsApp"));
@@ -165,13 +204,140 @@ describe("CandidatePipelineBoard", () => {
   it("shows the Settings tab with an unconfigured-role warning for roles with no work details", async () => {
     render(<CandidatePipelineBoard />);
     await waitFor(() => {
-      expect(screen.getByText(/3 candidates/i)).toBeInTheDocument();
+      expect(screen.getByText(/4 candidates/i)).toBeInTheDocument();
     });
 
     fireEvent.click(screen.getByText("Settings"));
 
     await waitFor(() => {
       expect(screen.getByText(/not yet configured/i)).toBeInTheDocument();
+    });
+  });
+
+  it("renders the Pipeline board with all candidate names visible", async () => {
+    render(<CandidatePipelineBoard />);
+    await waitFor(() => {
+      expect(screen.getByText(/4 candidates/i)).toBeInTheDocument();
+    });
+
+    fireEvent.click(screen.getByText("Pipeline board"));
+
+    await waitFor(() => {
+      expect(screen.getByText("Priya")).toBeInTheDocument();
+      expect(screen.getAllByText("Teja").length).toBeGreaterThan(0);
+    });
+  });
+
+  it("shows candidates grouped by role in the By Role tab", async () => {
+    render(<CandidatePipelineBoard />);
+    await waitFor(() => {
+      expect(screen.getByText(/4 candidates/i)).toBeInTheDocument();
+    });
+
+    fireEvent.click(screen.getByText("By role"));
+
+    await waitFor(() => {
+      expect(screen.getAllByText("NOC").length).toBeGreaterThan(0);
+      expect(screen.getAllByText("AI").length).toBeGreaterThan(0);
+    });
+  });
+
+  it("shows candidates grouped by recruiter in the By Recruiter tab", async () => {
+    render(<CandidatePipelineBoard />);
+    await waitFor(() => {
+      expect(screen.getByText(/4 candidates/i)).toBeInTheDocument();
+    });
+
+    fireEvent.click(screen.getByText("By recruiter"));
+
+    await waitFor(() => {
+      expect(screen.getAllByText("Usha").length).toBeGreaterThan(0);
+    });
+  });
+
+  it("switches theme when a theme button is clicked", async () => {
+    render(<CandidatePipelineBoard />);
+    await waitFor(() => {
+      expect(screen.getByText(/4 candidates/i)).toBeInTheDocument();
+    });
+
+    expect(document.documentElement.getAttribute("data-theme")).toBe("light");
+
+    fireEvent.click(screen.getByText("Dark"));
+
+    await waitFor(() => {
+      expect(document.documentElement.getAttribute("data-theme")).toBe("dark");
+    });
+  });
+
+  it("adds a new candidate via the Add Candidates form", async () => {
+    render(<CandidatePipelineBoard />);
+    await waitFor(() => {
+      expect(screen.getByText(/4 candidates/i)).toBeInTheDocument();
+    });
+
+    fireEvent.click(screen.getByText("Add candidates"));
+
+    const nameInput = await screen.findByPlaceholderText("Jane Doe");
+    fireEvent.change(nameInput, { target: { value: "New Candidate" } });
+
+    fireEvent.click(screen.getByText("Add to pipeline"));
+
+    await waitFor(() => {
+      expect(screen.getByText(/added 1 candidate/i)).toBeInTheDocument();
+    });
+  });
+
+  it("shows the 'Mark as reviewed' button for an escalated candidate with a new message, and clicking it works", async () => {
+    render(<CandidatePipelineBoard />);
+    await waitFor(() => {
+      expect(screen.getByText(/4 candidates/i)).toBeInTheDocument();
+    });
+
+    fireEvent.click(screen.getByText("Pipeline board"));
+    await waitFor(() => {
+      expect(screen.getAllByText("Teja").length).toBeGreaterThan(0);
+    });
+
+    fireEvent.click(screen.getAllByText("Teja")[0]);
+
+    const reviewButton = await screen.findByText(/mark as reviewed/i);
+    expect(reviewButton).toBeInTheDocument();
+
+    fireEvent.click(reviewButton);
+
+    await waitFor(() => {
+      expect(screen.queryByText(/mark as reviewed/i)).not.toBeInTheDocument();
+    });
+  });
+
+  it("toggles the Overview chart between 'Last 7 days' and 'All time'", async () => {
+    render(<CandidatePipelineBoard />);
+    await waitFor(() => {
+      expect(screen.getByText(/4 candidates/i)).toBeInTheDocument();
+    });
+
+    expect(screen.getByText(/messages sent, last 7 days/i)).toBeInTheDocument();
+
+    fireEvent.click(screen.getByText("All time"));
+
+    await waitFor(() => {
+      expect(screen.getByText(/messages sent, all time/i)).toBeInTheDocument();
+    });
+  });
+
+  it("expands a stat card's candidate list when clicked", async () => {
+    render(<CandidatePipelineBoard />);
+    await waitFor(() => {
+      expect(screen.getByText(/4 candidates/i)).toBeInTheDocument();
+    });
+
+    fireEvent.click(screen.getByText("Total candidates"));
+
+    await waitFor(() => {
+      // Rendered as a combined "Priya · NOC" string in one element, not
+      // "Priya" as standalone text -- match on a substring instead.
+      expect(screen.getAllByText(/Priya/).length).toBeGreaterThan(0);
     });
   });
 });
