@@ -1568,9 +1568,32 @@ function SettingsView({ candidates }) {
   const [recruiterLinkSaving, setRecruiterLinkSaving] = useState({});
   const [recruiterLinkSavedFlash, setRecruiterLinkSavedFlash] = useState({});
 
+  const [newRecruiterName, setNewRecruiterName] = useState("");
+  const [newRecruiterMessage, setNewRecruiterMessage] = useState("");
+
+  // Recruiters come from BOTH existing candidates AND whatever's already
+  // saved in recruiter_links -- this second source matters because it
+  // lets HR proactively add a recruiter's link (via "+ Add new
+  // recruiter" below) before any candidate is assigned to them yet,
+  // rather than only being able to react after the fact.
   const recruiters = Array.from(
-    new Set(candidates.map((c) => c.hiring_recruiter_name).filter(Boolean))
+    new Set([
+      ...candidates.map((c) => c.hiring_recruiter_name).filter(Boolean),
+      ...Object.keys(recruiterLinks),
+    ])
   ).sort();
+
+  const addNewRecruiter = () => {
+    const trimmed = newRecruiterName.trim();
+    if (!trimmed) return;
+    if (recruiterLinks[trimmed] !== undefined) {
+      setNewRecruiterMessage(`"${trimmed}" already exists below.`);
+      window.setTimeout(() => setNewRecruiterMessage(""), 2500);
+      return;
+    }
+    setRecruiterLinks((prev) => ({ ...prev, [trimmed]: "" }));
+    setNewRecruiterName("");
+  };
 
   const updateRecruiterLink = (recruiter, value) => {
     setRecruiterLinks((prev) => ({ ...prev, [recruiter]: value }));
@@ -1694,7 +1717,27 @@ function SettingsView({ candidates }) {
         <div className="mt-1 text-xs" style={{ color: "var(--text-mid)" }}>
           Each recruiter has their own Calendly link. Candidates are sent whichever recruiter they're actually assigned to (from the sheet's "hiring_recruiter_name" column).
         </div>
-        <div className="mt-3 space-y-2">
+        <div className="mt-3 mb-3 flex flex-wrap items-center gap-2">
+          <input
+            value={newRecruiterName}
+            onChange={(e) => setNewRecruiterName(e.target.value)}
+            onKeyDown={(e) => e.key === "Enter" && addNewRecruiter()}
+            placeholder="New recruiter name, e.g. Priya"
+            className={inputClass}
+            style={{ ...inputStyle, maxWidth: "220px" }}
+          />
+          <button
+            onClick={addNewRecruiter}
+            className="rounded-md px-3 py-1.5 text-sm font-medium transition-all duration-150 hover:opacity-90 active:scale-95"
+            style={{ background: "var(--signal)", color: "#ffffff" }}
+          >
+            + Add new recruiter
+          </button>
+          {newRecruiterMessage && (
+            <span className="font-mono text-xs" style={{ color: "var(--text-dim)" }}>{newRecruiterMessage}</span>
+          )}
+        </div>
+        <div className="space-y-2">
           {recruiters.map((recruiter) => (
             <div key={recruiter} className="flex items-center gap-2">
               <div className="w-32 shrink-0 truncate text-sm font-medium" style={{ color: "var(--text-hi)" }}>{recruiter}</div>
