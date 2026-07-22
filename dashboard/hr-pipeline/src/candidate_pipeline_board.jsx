@@ -1066,7 +1066,15 @@ function OverviewView({ candidates }) {
 
       {selectedStat && (() => {
         const filters = {
-          total: (c) => c.first_outreach_sent_at || c.followup_1_sent_at || c.followup_2_sent_at || c.interview_followup_sent_at,
+          // "total" now matches the "Total candidates" card's own
+          // definition (candidates.length, i.e. literally everyone) --
+          // this used to mean "has some outreach/follow-up activity",
+          // which became inconsistent with the card's label and
+          // displayed number after it was renamed from "Templates
+          // dispatched" to "Total candidates" earlier. Clicking a stat
+          // card should always expand to exactly what its own number
+          // represents.
+          total: () => true,
           outreach: (c) => c.status === "messaged",
           followup1: (c) => c.followup_1_sent_at,
           followup2: (c) => c.followup_2_sent_at,
