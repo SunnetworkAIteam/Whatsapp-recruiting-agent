@@ -44,6 +44,10 @@ HEADER_ALIASES = {
     "college name": "college_name",
     "hiring recruiter name": "hiring_recruiter_name",
     "recruiter name": "hiring_recruiter_name",
+    "hiring recruiter": "hiring_recruiter_name",  # real production sheet header has no "Name" suffix
+    "recruiter": "hiring_recruiter_name",
+    "hiring recruiter": "hiring_recruiter_name",  # real production sheet header has no "Name" suffix
+    "recruiter": "hiring_recruiter_name",
     "interview score": "interview_score",
     "communication feedback (5)": "communication",
     "communication feedback": "communication",
