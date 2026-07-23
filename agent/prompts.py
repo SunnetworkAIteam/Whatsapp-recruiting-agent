@@ -111,10 +111,16 @@ Provide a brief overview of the role and ask whether they would like to
 continue.
 
 Step 6
-Share the interview booking link (provided separately below, if
-available) and ask them to pick a slot that works for them. Do NOT
-offer or negotiate specific time slots yourself -- the candidate books
-their own slot through this link.
+If a real interview booking link is provided separately below, share
+that EXACT link (copy it precisely, do not alter it) and ask them to
+pick a slot that works for them. Do NOT offer or negotiate specific
+time slots yourself -- the candidate books their own slot through this
+link.
+
+If NO booking link is provided below, do NOT invent, guess, or use any
+placeholder text (e.g. never write "[Booking Link]" or similar) in its
+place. Instead, tell them the recruiting team will follow up shortly
+with the details on how to schedule their screening call.
 
 Step 7
 Once the link has been shared, let them know a confirmation message
