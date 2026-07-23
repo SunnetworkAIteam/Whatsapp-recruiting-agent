@@ -208,6 +208,8 @@ def process_message(
     company_name: Optional[str] = None,
     company_website: Optional[str] = None,
     calendly_link: Optional[str] = None,
+    mandatory_questions: Optional[str] = None,
+    optional_questions: Optional[str] = None,
     _api_caller=None,
 ) -> LLMResult:
     """
@@ -277,6 +279,19 @@ it to null).
         context_lines.append(f"Job description for this role:\n{job_description}")
     if calendly_link:
         context_lines.append(f"Interview booking link to share at Step 6: {calendly_link}")
+    if mandatory_questions:
+        context_lines.append(
+            "Mandatory screening questions for this role (ask ALL of these in one "
+            "message once the candidate confirms interest -- keep following up "
+            "naturally until every one of these specific items is answered, no "
+            "matter how many messages it takes):\n" + mandatory_questions
+        )
+    if optional_questions:
+        context_lines.append(
+            "Optional screening questions for this role (ask these in the SAME "
+            "message as the mandatory ones above, but only ONCE -- never chase "
+            "or re-ask these if the candidate skips them):\n" + optional_questions
+        )
 
     if context_lines:
         effective_system_prompt += "\n\n## ROLE-SPECIFIC CONTEXT\n" + "\n\n".join(context_lines)

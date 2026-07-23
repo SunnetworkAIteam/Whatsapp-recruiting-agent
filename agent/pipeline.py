@@ -426,6 +426,8 @@ def handle_candidate_reply(message: TwilioInboundMessage) -> dict:
         company_name=role_context.get("company_name"),
         company_website=role_context.get("company_website"),
         calendly_link=calendly_link,
+        mandatory_questions=role_context.get("mandatory_questions"),
+        optional_questions=role_context.get("optional_questions"),
     )
 
     # If the LLM just captured a real name (e.g. this candidate came in

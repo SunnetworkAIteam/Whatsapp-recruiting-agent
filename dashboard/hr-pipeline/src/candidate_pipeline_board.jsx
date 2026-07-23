@@ -1614,7 +1614,7 @@ function SettingsView({ candidates }) {
     }
   };
 
-  const blankRoleDetails = { work_type: "", hours: "", job_description: "", company_name: "", company_website: "" };
+  const blankRoleDetails = { work_type: "", hours: "", job_description: "", company_name: "", company_website: "", mandatory_questions: "", optional_questions: "" };
 
   // Roles come from BOTH existing candidates AND whatever's already saved
   // in role_work_details -- this second source matters because it lets HR
@@ -1650,6 +1650,8 @@ function SettingsView({ candidates }) {
             job_description: r.job_description || "",
             company_name: r.company_name || "",
             company_website: r.company_website || "",
+            mandatory_questions: r.mandatory_questions || "",
+            optional_questions: r.optional_questions || "",
           };
         });
         setDetails(map);
@@ -1685,6 +1687,8 @@ function SettingsView({ candidates }) {
         job_description: row.job_description,
         company_name: row.company_name,
         company_website: row.company_website,
+        mandatory_questions: row.mandatory_questions,
+        optional_questions: row.optional_questions,
         updated_at: new Date().toISOString(),
       });
     setSaving((prev) => ({ ...prev, [role]: false }));
@@ -1902,6 +1906,37 @@ function SettingsView({ candidates }) {
                   className={inputClass}
                   style={{ ...inputStyle, resize: "vertical" }}
                 />
+              </div>
+
+              <div className="mt-2 grid grid-cols-1 gap-2 sm:grid-cols-2">
+                <div>
+                  <div className="mb-1 font-mono text-[11px] uppercase tracking-wide" style={{ color: "var(--text-dim)" }}>Mandatory Questions (one per line)</div>
+                  <textarea
+                    value={row.mandatory_questions}
+                    onChange={(e) => updateField(role, "mandatory_questions", e.target.value)}
+                    placeholder={"Name\nUpdated Resume\nCurrent Location\nCurrent Salary\nExpected Salary\nNotice Period\nTotal Years of Experience"}
+                    rows={5}
+                    className={inputClass}
+                    style={{ ...inputStyle, resize: "vertical" }}
+                  />
+                  <div className="mt-1 text-[11px]" style={{ color: "var(--text-dim)" }}>
+                    The AI keeps following up until every one of these is answered.
+                  </div>
+                </div>
+                <div>
+                  <div className="mb-1 font-mono text-[11px] uppercase tracking-wide" style={{ color: "var(--text-dim)" }}>Optional Questions (one per line)</div>
+                  <textarea
+                    value={row.optional_questions}
+                    onChange={(e) => updateField(role, "optional_questions", e.target.value)}
+                    placeholder={"LinkedIn Profile\nGitHub Profile"}
+                    rows={5}
+                    className={inputClass}
+                    style={{ ...inputStyle, resize: "vertical" }}
+                  />
+                  <div className="mt-1 text-[11px]" style={{ color: "var(--text-dim)" }}>
+                    Asked once -- the AI never chases these if left unanswered.
+                  </div>
+                </div>
               </div>
             </div>
           );
