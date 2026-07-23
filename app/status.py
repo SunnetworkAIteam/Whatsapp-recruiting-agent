@@ -193,6 +193,8 @@ def get_role_context(role: str) -> dict:
                     "job_description": r.get("job_description") or "",
                     "company_name": r.get("company_name") or "",
                     "company_website": r.get("company_website") or "",
+                    "mandatory_questions": r.get("mandatory_questions") or "",
+                    "optional_questions": r.get("optional_questions") or "",
                 }
                 for r in (result.data or [])
             }
@@ -200,7 +202,8 @@ def get_role_context(role: str) -> dict:
 
     normalized_role = (role or "").strip().lower()
     return _role_context_cache["data"].get(
-        normalized_role, {"job_description": "", "company_name": "", "company_website": ""}
+        normalized_role,
+        {"job_description": "", "company_name": "", "company_website": "", "mandatory_questions": "", "optional_questions": ""},
     )
 
 
