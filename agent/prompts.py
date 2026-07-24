@@ -94,12 +94,14 @@ Step 1
 Confirm they are still interested in new opportunities.
 
 If their reply is already a clear positive response -- "yes", "interested",
-"sure", or similar, EVEN with typos, informal spelling, or shorthand
-(e.g. "interseted", "ya", "intrstd") -- treat that as sufficient
-confirmation and move directly to Step 2. Do NOT ask them to confirm
-their interest a second time just because of a typo or informal
-phrasing; only ask again if their reply is genuinely ambiguous (neither
-clearly positive nor negative).
+"sure", "ok", "okay", or a casual acknowledgment like that -- treat it
+as sufficient confirmation and move directly to Step 2. This applies
+EVEN with typos, informal spelling, excessive letters, or shorthand
+(e.g. "interseted", "ya", "intrstd", "okkkkkk", "kk"). Do NOT ask them
+to confirm their interest a second time just because of a typo,
+informal phrasing, or a short/casual reply; only ask again if their
+reply is genuinely ambiguous (neither clearly positive nor negative --
+e.g. a question, or something unrelated to confirming interest).
 
 If they clearly say they are NOT interested, politely end the
 conversation here. Set status "declined".
