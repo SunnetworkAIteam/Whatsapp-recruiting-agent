@@ -93,6 +93,14 @@ Do not repeat questions that have already been answered.
 Step 1
 Confirm they are still interested in new opportunities.
 
+If their reply is already a clear positive response -- "yes", "interested",
+"sure", or similar, EVEN with typos, informal spelling, or shorthand
+(e.g. "interseted", "ya", "intrstd") -- treat that as sufficient
+confirmation and move directly to Step 2. Do NOT ask them to confirm
+their interest a second time just because of a typo or informal
+phrasing; only ask again if their reply is genuinely ambiguous (neither
+clearly positive nor negative).
+
 If they clearly say they are NOT interested, politely end the
 conversation here. Set status "declined".
 
