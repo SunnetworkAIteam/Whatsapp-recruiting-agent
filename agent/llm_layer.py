@@ -274,6 +274,9 @@ it to null).
     if company_name:
         context_lines.append(
             f"Client company for this role: {company_name}" + (f" ({company_website})" if company_website else "")
+            + " -- REMINDER: do not mention this company name or website in your Step 2 "
+            "job-description summary; only bring it up if the candidate specifically asks "
+            "about the company, later in the conversation."
         )
     if job_description:
         context_lines.append(f"Job description for this role:\n{job_description}")
