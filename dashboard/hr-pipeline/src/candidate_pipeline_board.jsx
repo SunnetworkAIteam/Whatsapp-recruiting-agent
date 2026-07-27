@@ -1552,6 +1552,256 @@ function MessagesView({ candidates, onOpenCandidate }) {
 // agent/pipeline.py's _build_job_outreach_variables and
 // app/status.py's get_role_work_details).
 // ---------------------------------------------------------------------------
+// ---------------------------------------------------------------------------
+// SCREENING DETAILS VIEW
+// ---------------------------------------------------------------------------
+function ScreeningDetailsView({ candidates }) {
+  const [search, setSearch] = useState("");
+  const [roleFilter, setRoleFilter] = useState("");
+  const [recruiterFilter, setRecruiterFilter] = useState("");
+  const [statusFilter, setStatusFilter] = useState("");
+  const [historyCounts, setHistoryCounts] = useState({}); // { "candidateId:field_name": count }
+  const [historyModal, setHistoryModal] = useState(null); // { candidateId, field, entries }
+  const [resumeLoading, setResumeLoading] = useState({});
+
+  useEffect(() => {
+    (async () => {
+      const { data, error } = await supabase
+        .from("screening_field_history")
+        .select("candidate_id, field_name");
+      if (!error && data) {
+        const counts = {};
+        data.forEach((r) => {
+          const key = `${r.candidate_id}:${r.field_name}`;
+          counts[key] = (counts[key] || 0) + 1;
+        });
+        setHistoryCounts(counts);
+      }
+    })();
+  }, []);
+
+  const roles = Array.from(new Set(candidates.map((c) => c.role).filter(Boolean))).sort();
+  const recruiters = Array.from(new Set(candidates.map((c) => c.hiring_recruiter_name).filter(Boolean))).sort();
+  const statuses = Array.from(new Set(candidates.map((c) => c.status).filter(Boolean))).sort();
+
+  const filtered = candidates.filter((c) => {
+    if (roleFilter && c.role !== roleFilter) return false;
+    if (recruiterFilter && c.hiring_recruiter_name !== recruiterFilter) return false;
+    if (statusFilter && c.status !== statusFilter) return false;
+    if (search) {
+      const q = search.toLowerCase();
+      const matchesName = (c.name || "").toLowerCase().includes(q);
+      const matchesPhone = (c.phone || "").includes(search);
+      if (!matchesName && !matchesPhone) return false;
+    }
+    return true;
+  });
+
+  const openHistory = async (candidateId, field, label) => {
+    const { data } = await supabase
+      .from("screening_field_history")
+      .select("value, recorded_at")
+      .eq("candidate_id", candidateId)
+      .eq("field_name", field)
+      .order("recorded_at", { ascending: false });
+    setHistoryModal({ candidateId, field, label, entries: data || [] });
+  };
+
+  const downloadResume = async (candidateId) => {
+    setResumeLoading((prev) => ({ ...prev, [candidateId]: true }));
+    try {
+      const apiBase = import.meta.env.VITE_API_BASE_URL;
+      const res = await fetch(`${apiBase}/candidates/${candidateId}/resume-url`);
+      if (!res.ok) throw new Error("Failed to get download link");
+      const data = await res.json();
+      window.open(data.url, "_blank");
+    } catch (err) {
+      // eslint-disable-next-line no-console
+      console.error("Failed to fetch resume URL:", err);
+    } finally {
+      setResumeLoading((prev) => ({ ...prev, [candidateId]: false }));
+    }
+  };
+
+  const exportToExcel = async () => {
+    const XLSX = await import("xlsx");
+    const rows = filtered.map((c) => ({
+      Name: c.name || "",
+      Phone: c.phone || "",
+      Role: c.role || "",
+      Recruiter: c.hiring_recruiter_name || "",
+      Location: c.extracted_location || "",
+      "Total Experience": c.extracted_experience || "",
+      "Current CTC": c.extracted_current_ctc || "",
+      "Expected CTC": c.extracted_expected_ctc || "",
+      "Notice Period": c.extracted_notice_period || "",
+      Status: c.status || "",
+      "Date Applied": c.created_at ? new Date(c.created_at).toLocaleDateString() : "",
+      "Resume on file": c.resume_url ? "Yes" : "No",
+    }));
+    const worksheet = XLSX.utils.json_to_sheet(rows);
+    const workbook = XLSX.utils.book_new();
+    XLSX.utils.book_append_sheet(workbook, worksheet, "Screening Details");
+    XLSX.writeFile(workbook, `screening-details-${new Date().toISOString().slice(0, 10)}.xlsx`);
+  };
+
+  const Field = ({ candidateId, field, value, label }) => {
+    const count = historyCounts[`${candidateId}:${field}`] || 0;
+    return (
+      <div className="flex items-center gap-1">
+        <span>{value || "—"}</span>
+        {count > 1 && (
+          <button
+            onClick={() => openHistory(candidateId, field, label)}
+            className="rounded-full px-1.5 py-0.5 font-mono text-[10px] transition-colors hover:opacity-80"
+            style={{ background: hexToRgba("#0891B2", 0.15), color: "#0891B2" }}
+            title={`${count} updates -- click to see history`}
+          >
+            {count}
+          </button>
+        )}
+      </div>
+    );
+  };
+
+  return (
+    <div>
+      <div className="mb-4 flex flex-wrap items-center gap-2">
+        <input
+          value={search}
+          onChange={(e) => setSearch(e.target.value)}
+          placeholder="Search by name or phone..."
+          className={inputClass}
+          style={{ ...inputStyle, maxWidth: "220px" }}
+        />
+        <select value={roleFilter} onChange={(e) => setRoleFilter(e.target.value)} className={inputClass} style={{ ...inputStyle, maxWidth: "160px" }}>
+          <option value="">All Roles</option>
+          {roles.map((r) => <option key={r} value={r}>{r}</option>)}
+        </select>
+        <select value={recruiterFilter} onChange={(e) => setRecruiterFilter(e.target.value)} className={inputClass} style={{ ...inputStyle, maxWidth: "160px" }}>
+          <option value="">All Recruiters</option>
+          {recruiters.map((r) => <option key={r} value={r}>{r}</option>)}
+        </select>
+        <select value={statusFilter} onChange={(e) => setStatusFilter(e.target.value)} className={inputClass} style={{ ...inputStyle, maxWidth: "160px" }}>
+          <option value="">All Statuses</option>
+          {statuses.map((s) => <option key={s} value={s}>{s}</option>)}
+        </select>
+        <button
+          onClick={exportToExcel}
+          className="ml-auto rounded-md px-3 py-1.5 text-sm font-medium transition-all duration-150 hover:opacity-90 active:scale-95"
+          style={{ background: "var(--signal)", color: "#ffffff" }}
+        >
+          Download Excel
+        </button>
+      </div>
+
+      <div className="overflow-x-auto rounded-xl" style={{ border: "1px solid var(--line)" }}>
+        <table className="w-full min-w-[1100px] border-collapse text-sm">
+          <thead>
+            <tr
+              className="border-b text-left font-mono text-xs font-medium uppercase tracking-wide"
+              style={{ borderColor: "var(--line)", background: "var(--surface)", color: "var(--text-dim)" }}
+            >
+              <th className="px-3 py-2">Name</th>
+              <th className="px-3 py-2">Phone</th>
+              <th className="px-3 py-2">Role</th>
+              <th className="px-3 py-2">Recruiter</th>
+              <th className="px-3 py-2">Location</th>
+              <th className="px-3 py-2">Experience</th>
+              <th className="px-3 py-2">Current CTC</th>
+              <th className="px-3 py-2">Expected CTC</th>
+              <th className="px-3 py-2">Notice Period</th>
+              <th className="px-3 py-2">Status</th>
+              <th className="px-3 py-2">Applied</th>
+              <th className="px-3 py-2">Resume</th>
+            </tr>
+          </thead>
+          <tbody>
+            {filtered.map((c) => (
+              <tr key={c.id} className="border-b last:border-0" style={{ borderColor: "var(--line)" }}>
+                <td className="px-3 py-2 font-medium" style={{ color: "var(--text-hi)" }}>{c.name || "—"}</td>
+                <td className="px-3 py-2 font-mono text-xs" style={{ color: "var(--text-mid)" }}>{c.phone || "—"}</td>
+                <td className="px-3 py-2" style={{ color: "var(--text-mid)" }}>{c.role || "—"}</td>
+                <td className="px-3 py-2" style={{ color: "var(--text-mid)" }}>{c.hiring_recruiter_name || "—"}</td>
+                <td className="px-3 py-2" style={{ color: "var(--text-mid)" }}>
+                  <Field candidateId={c.id} field="extracted_location" value={c.extracted_location} label="Location" />
+                </td>
+                <td className="px-3 py-2" style={{ color: "var(--text-mid)" }}>
+                  <Field candidateId={c.id} field="extracted_experience" value={c.extracted_experience} label="Total Experience" />
+                </td>
+                <td className="px-3 py-2" style={{ color: "var(--text-mid)" }}>
+                  <Field candidateId={c.id} field="extracted_current_ctc" value={c.extracted_current_ctc} label="Current CTC" />
+                </td>
+                <td className="px-3 py-2" style={{ color: "var(--text-mid)" }}>
+                  <Field candidateId={c.id} field="extracted_expected_ctc" value={c.extracted_expected_ctc} label="Expected CTC" />
+                </td>
+                <td className="px-3 py-2" style={{ color: "var(--text-mid)" }}>
+                  <Field candidateId={c.id} field="extracted_notice_period" value={c.extracted_notice_period} label="Notice Period" />
+                </td>
+                <td className="px-3 py-2">
+                  <StatusChip status={c.status} />
+                </td>
+                <td className="px-3 py-2 font-mono text-xs" style={{ color: "var(--text-dim)" }}>
+                  {c.created_at ? new Date(c.created_at).toLocaleDateString() : "—"}
+                </td>
+                <td className="px-3 py-2">
+                  {c.resume_url ? (
+                    <button
+                      onClick={() => downloadResume(c.id)}
+                      disabled={resumeLoading[c.id]}
+                      className="rounded-md px-2 py-1 text-xs font-medium transition-all duration-150 hover:opacity-90 active:scale-95 disabled:opacity-50"
+                      style={{ background: hexToRgba("#16A34A", 0.15), color: "#16A34A" }}
+                    >
+                      {resumeLoading[c.id] ? "Loading..." : "Download"}
+                    </button>
+                  ) : (
+                    <span className="text-xs" style={{ color: "var(--text-dim)" }}>—</span>
+                  )}
+                </td>
+              </tr>
+            ))}
+            {filtered.length === 0 && (
+              <tr>
+                <td colSpan={12} className="px-3 py-6 text-center font-mono text-xs" style={{ color: "var(--text-dim)" }}>
+                  No candidates match the current filters.
+                </td>
+              </tr>
+            )}
+          </tbody>
+        </table>
+      </div>
+
+      {historyModal && (
+        <div
+          className="fixed inset-0 z-50 flex items-center justify-center p-4"
+          style={{ background: "rgba(5, 7, 14, 0.7)", backdropFilter: "blur(4px)" }}
+          onClick={() => setHistoryModal(null)}
+        >
+          <div
+            className="max-h-[70vh] w-full max-w-md overflow-y-auto rounded-2xl p-6"
+            style={{ background: "var(--surface)", border: "1px solid var(--line)" }}
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="flex items-center justify-between">
+              <div className="font-display text-sm font-semibold" style={{ color: "var(--text-hi)" }}>
+                {historyModal.label} -- history
+              </div>
+              <button onClick={() => setHistoryModal(null)} className="text-sm" style={{ color: "var(--text-dim)" }}>Close</button>
+            </div>
+            <div className="mt-3 space-y-2">
+              {historyModal.entries.map((entry, i) => (
+                <div key={i} className="rounded-lg p-2" style={{ background: "var(--surface-hover)" }}>
+                  <div className="text-sm" style={{ color: "var(--text-hi)" }}>{entry.value}</div>
+                  <div className="mt-0.5 font-mono text-[11px]" style={{ color: "var(--text-dim)" }}>{timeAgo(entry.recorded_at)}</div>
+                </div>
+              ))}
+            </div>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
 function SettingsView({ candidates }) {
   const [details, setDetails] = useState({});
   const [loading, setLoading] = useState(true);
@@ -2111,6 +2361,7 @@ const TABS = [
   { key: "messages", label: "Messages", icon: MessageSquareText },
   { key: "no-whatsapp", label: "No WhatsApp", icon: PhoneOff },
   { key: "add", label: "Add candidates", icon: UserPlus },
+  { key: "screening", label: "Screening Details" },
   { key: "settings", label: "Role & Messaging Setup" },
 ];
 
@@ -2296,6 +2547,7 @@ export default function CandidatePipelineBoard() {
         <NoWhatsappView candidates={candidates} onOpenCandidate={(c) => setSelectedId(c.id)} />
       )}
       {tab === "add" && <AddCandidatesView addCandidates={addCandidates} />}
+      {tab === "screening" && <ScreeningDetailsView candidates={candidates} />}
       {tab === "settings" && <SettingsView candidates={candidates} />}
 
       </div>
