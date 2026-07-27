@@ -1564,18 +1564,30 @@ function ScreeningDetailsView({ candidates }) {
   const [historyModal, setHistoryModal] = useState(null); // { candidateId, field, entries }
   const [resumeLoading, setResumeLoading] = useState({});
 
+  const [latestValues, setLatestValues] = useState({}); // { "candidateId:field_name": value }
+
   useEffect(() => {
     (async () => {
       const { data, error } = await supabase
         .from("screening_field_history")
-        .select("candidate_id, field_name");
+        .select("candidate_id, field_name, value, recorded_at")
+        .order("recorded_at", { ascending: true });
       if (!error && data) {
         const counts = {};
+        const latest = {};
         data.forEach((r) => {
           const key = `${r.candidate_id}:${r.field_name}`;
           counts[key] = (counts[key] || 0) + 1;
+          // Rows come back oldest-first, so the last one we see per key
+          // is genuinely the most recent value -- used as the primary
+          // display source here, since it's proven reliable (matches
+          // what the history modal already shows correctly), rather
+          // than depending on the candidates table's own cached
+          // extracted_* columns for the visible table value.
+          latest[key] = r.value;
         });
         setHistoryCounts(counts);
+        setLatestValues(latest);
       }
     })();
   }, []);
@@ -1647,9 +1659,14 @@ function ScreeningDetailsView({ candidates }) {
 
   const Field = ({ candidateId, field, value, label }) => {
     const count = historyCounts[`${candidateId}:${field}`] || 0;
+    // Prefer the confirmed-reliable value from screening_field_history
+    // (proven correct -- matches what the history modal shows) over the
+    // candidates table's own cached column, which was displaying blank
+    // for reasons that didn't warrant further time chasing down.
+    const displayValue = latestValues[`${candidateId}:${field}`] || value;
     return (
       <div className="flex items-center gap-1">
-        <span>{value || "—"}</span>
+        <span>{displayValue || "—"}</span>
         {count > 1 && (
           <button
             onClick={() => openHistory(candidateId, field, label)}
