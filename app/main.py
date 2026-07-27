@@ -169,3 +169,22 @@ async def send_message(payload: SendMessageRequest):
     append_conversation_turn(payload.candidate_id, candidate, "assistant", payload.message)
 
     return {"status": "sent", "twilio_message_sid": twilio_sid}
+
+
+@app.get("/candidates/{candidate_id}/resume-url")
+def get_resume_url(candidate_id: str):
+    """
+    Generates a short-lived (1 hour) presigned S3 download URL for a
+    candidate's resume. Must happen server-side, never in the browser --
+    generating a presigned URL requires the AWS secret access key, which
+    must never be exposed to the dashboard's frontend code.
+    """
+    result = supabase.table("candidates").select("resume_url").eq("id", candidate_id).execute()
+    if not result.data or not result.data[0].get("resume_url"):
+        raise HTTPException(status_code=404, detail="No resume on file for this candidate.")
+
+    from app.resume_storage import generate_resume_download_url
+    url = generate_resume_download_url(result.data[0]["resume_url"])
+    if not url:
+        raise HTTPException(status_code=502, detail="Failed to generate a download link.")
+    return {"url": url}

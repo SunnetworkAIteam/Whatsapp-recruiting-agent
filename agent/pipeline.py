@@ -41,6 +41,7 @@ from app.status import (
     get_safe_role_display,
     get_role_context,
     get_recruiter_calendly_link,
+    record_screening_field_history,
 )
 from app.validation import normalize_phone
 
@@ -186,6 +187,28 @@ def handle_candidate_reply(message: TwilioInboundMessage) -> dict:
             "so they clearly have WhatsApp.",
             candidate_id,
         )
+
+    # A candidate sending an actual file attachment (most commonly their
+    # resume) previously vanished entirely -- only text messages were
+    # ever read. Detect it here and store it in S3, so it shows up as a
+    # download link in the dashboard's Screening Details tab, rather
+    # than being silently ignored.
+    if message.has_media:
+        try:
+            from app.resume_storage import download_and_store_resume
+            object_key = download_and_store_resume(
+                twilio_media_url=message.media_url_0,
+                content_type=message.media_content_type_0 or "application/octet-stream",
+                candidate_id=candidate_id,
+            )
+            update_candidate_metadata(candidate_id, {
+                "resume_url": object_key,
+                "resume_received_at": datetime.now(timezone.utc).isoformat(),
+            })
+            candidate["resume_url"] = object_key
+            logger.info("Stored resume/attachment for candidate %s", candidate_id)
+        except Exception:
+            logger.exception("Failed to store attachment for candidate %s", candidate_id)
 
     # ---------------------------------------------------------------------------
     # Timing Guardrail: Construct state snapshot BEFORE updating inbound timestamp
@@ -460,6 +483,25 @@ def handle_candidate_reply(message: TwilioInboundMessage) -> dict:
     if result.candidate_name:
         update_candidate_metadata(candidate_id, {"name": result.candidate_name})
         candidate["name"] = result.candidate_name
+
+    # Save any structured screening data the LLM extracted this turn
+    # (see prompts.py's "extracted_*" fields) -- powers the dashboard's
+    # Screening Details tab. Only fields the candidate has actually
+    # stated come through here; anything not yet known stays untouched.
+    extracted_updates = {}
+    for field in ("extracted_location", "extracted_current_ctc", "extracted_expected_ctc", "extracted_notice_period", "extracted_experience"):
+        value = getattr(result, field, None)
+        if value:
+            extracted_updates[field] = value
+    if extracted_updates:
+        extracted_updates["extracted_details_updated_at"] = datetime.now(timezone.utc).isoformat()
+        update_candidate_metadata(candidate_id, extracted_updates)
+        candidate.update(extracted_updates)
+        # Preserve every value ever given for these fields (not just the
+        # latest) -- HR wants to see the full history of what a candidate
+        # said and when, not just have earlier answers silently
+        # overwritten with no trace.
+        record_screening_field_history(candidate_id, extracted_updates)
 
     if result.escalated:
         logger.info(

@@ -76,6 +76,11 @@ class LLMResult:
     reason: str
     raw_content: str
     candidate_name: Optional[str] = None
+    extracted_location: Optional[str] = None
+    extracted_current_ctc: Optional[str] = None
+    extracted_expected_ctc: Optional[str] = None
+    extracted_notice_period: Optional[str] = None
+    extracted_experience: Optional[str] = None
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
@@ -339,6 +344,11 @@ it to null).
     if captured_name is not None and not str(captured_name).strip():
         captured_name = None
 
+    def _clean(value):
+        if value is not None and not str(value).strip():
+            return None
+        return value
+
     return LLMResult(
         reply=reply,
         status=status,
@@ -347,5 +357,10 @@ it to null).
         escalated=should_escalate,
         reason=reason,
         raw_content=raw_content,
+        extracted_location=_clean(parsed.get("extracted_location")),
+        extracted_current_ctc=_clean(parsed.get("extracted_current_ctc")),
+        extracted_expected_ctc=_clean(parsed.get("extracted_expected_ctc")),
+        extracted_notice_period=_clean(parsed.get("extracted_notice_period")),
+        extracted_experience=_clean(parsed.get("extracted_experience")),
         candidate_name=captured_name,
     )
