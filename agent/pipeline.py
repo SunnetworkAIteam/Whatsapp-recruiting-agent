@@ -165,6 +165,28 @@ def handle_candidate_reply(message: TwilioInboundMessage) -> dict:
     candidate_id = candidate["id"]
     phone_number = message.from_number
 
+    # A reply is undeniable proof this candidate can actually be reached
+    # via WhatsApp, regardless of any past delivery failure. Real bug this
+    # guards against: candidates flagged "no_whatsapp" from one earlier
+    # failed message (e.g. transient throttling) stayed flagged that way
+    # forever even after they went on to have full multi-message
+    # conversations -- confirmed in production. Clearing it here, not
+    # just on a "delivered"/"read" status callback, means it happens
+    # immediately on the very first sign of life, no waiting on Twilio's
+    # own status callback timing.
+    if candidate.get("platform") == "no_whatsapp":
+        update_candidate_metadata(candidate_id, {
+            "platform": "whatsapp",
+            "delivery_error_code": None,
+            "delivery_error_message": None,
+        })
+        candidate["platform"] = "whatsapp"
+        logger.info(
+            "Candidate %s cleared from no_whatsapp -- they just replied, "
+            "so they clearly have WhatsApp.",
+            candidate_id,
+        )
+
     # ---------------------------------------------------------------------------
     # Timing Guardrail: Construct state snapshot BEFORE updating inbound timestamp
     # ---------------------------------------------------------------------------

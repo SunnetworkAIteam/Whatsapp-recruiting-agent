@@ -167,4 +167,31 @@ async def whatsapp_status_callback(request: Request):
                 message_sid,
             )
 
+    elif message_status in ("delivered", "read") and to_number:
+        # Real bug this guards against: a candidate flagged "no_whatsapp"
+        # from one earlier failed/undelivered message (e.g. a transient
+        # throttling error) stayed flagged that way FOREVER, even after
+        # later messages to the same number succeeded -- there was no
+        # corresponding logic anywhere to clear the flag once delivery
+        # started working again. Confirmed in production: candidates
+        # flagged "no_whatsapp" with full multi-message conversation
+        # histories, meaning they were never actually unreachable at all.
+        from app.validation import normalize_phone
+        from app.status import get_candidate_by_phone, update_candidate_metadata
+
+        normalized_phone = normalize_phone(to_number)
+        candidate = get_candidate_by_phone(normalized_phone)
+
+        if candidate and candidate.get("platform") == "no_whatsapp":
+            update_candidate_metadata(candidate["id"], {
+                "platform": "whatsapp",
+                "delivery_status": message_status,
+                "delivery_error_code": None,
+                "delivery_error_message": None,
+            })
+            logger.info(
+                "Candidate %s cleared from no_whatsapp -- a later message was "
+                "successfully %s.",
+                candidate["id"], message_status,
+            )
     return Response(status_code=204)
