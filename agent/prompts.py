@@ -280,6 +280,24 @@ Required format:
     "escalate": ...
 }}
 
+Whenever the candidate has told you any of the following, ALSO include
+it as an additional field in the same JSON object (using exactly these
+field names). Only include a field once the candidate has actually
+given that specific piece of information -- omit any field you don't
+yet know, rather than guessing or leaving it as an empty string:
+
+- "extracted_location": their current location, as they stated it
+- "extracted_current_ctc": their current CTC/salary, as they stated it
+- "extracted_expected_ctc": their expected CTC/salary, as they stated it
+- "extracted_notice_period": their notice period or earliest joining
+  date, as they stated it
+- "extracted_experience": their total years of experience, as they
+  stated it
+
+Report the value in whatever wording/format the candidate actually
+used (e.g. "10 LPA", "immediate", "2 months") -- do not reformat,
+convert, or normalize it.
+
 Rules:
 
 reply

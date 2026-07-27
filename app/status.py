@@ -67,6 +67,27 @@ _role_details_cache = {"data": None, "fetched_at": None}
 _ROLE_DETAILS_CACHE_TTL = _timedelta(minutes=2)
 
 
+def record_screening_field_history(candidate_id: str, updates: dict) -> None:
+    """
+    Appends one row per changed field to screening_field_history, so
+    every value a candidate has ever given for these fields (location,
+    CTC, notice period, experience) is preserved -- not just the
+    latest, which lives in the candidates table's extracted_* columns
+    for fast table display. The "extracted_details_updated_at" key is
+    metadata about the update itself, not a field value, so it's
+    skipped here.
+    """
+    if supabase is None:
+        return
+    rows = [
+        {"candidate_id": candidate_id, "field_name": field, "value": value}
+        for field, value in updates.items()
+        if field != "extracted_details_updated_at"
+    ]
+    if rows:
+        supabase.table("screening_field_history").insert(rows).execute()
+
+
 def get_app_setting(key: str) -> Optional[str]:
     """
     Read a single global setting from the app_settings key-value table
