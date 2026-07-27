@@ -1563,6 +1563,22 @@ function ScreeningDetailsView({ candidates }) {
   const [historyCounts, setHistoryCounts] = useState({}); // { "candidateId:field_name": count }
   const [historyModal, setHistoryModal] = useState(null); // { candidateId, field, entries }
   const [resumeLoading, setResumeLoading] = useState({});
+  const [deletingId, setDeletingId] = useState(null);
+
+  const deleteCandidate = async (candidateId, candidateName) => {
+    const confirmed = window.confirm(
+      `Delete ${candidateName || "this candidate"}? This is permanent and cannot be undone.`
+    );
+    if (!confirmed) return;
+    setDeletingId(candidateId);
+    const { error } = await supabase.from("candidates").delete().eq("id", candidateId);
+    setDeletingId(null);
+    if (error) {
+      // eslint-disable-next-line no-console
+      console.error("Failed to delete candidate:", error);
+      window.alert("Failed to delete this candidate. Check the console for details.");
+    }
+  };
 
   const [latestValues, setLatestValues] = useState({}); // { "candidateId:field_name": value }
 
@@ -1731,6 +1747,7 @@ function ScreeningDetailsView({ candidates }) {
               <th className="px-3 py-2">Status</th>
               <th className="px-3 py-2">Applied</th>
               <th className="px-3 py-2">Resume</th>
+              <th className="px-3 py-2"></th>
             </tr>
           </thead>
           <tbody>
@@ -1775,11 +1792,21 @@ function ScreeningDetailsView({ candidates }) {
                     <span className="text-xs" style={{ color: "var(--text-dim)" }}>—</span>
                   )}
                 </td>
+                <td className="px-3 py-2">
+                  <button
+                    onClick={() => deleteCandidate(c.id, c.name)}
+                    disabled={deletingId === c.id}
+                    className="rounded-md px-2 py-1 text-xs font-medium transition-all duration-150 hover:opacity-90 active:scale-95 disabled:opacity-50"
+                    style={{ background: hexToRgba("#FB5D74", 0.15), color: "#FB5D74" }}
+                  >
+                    {deletingId === c.id ? "Deleting..." : "Delete"}
+                  </button>
+                </td>
               </tr>
             ))}
             {filtered.length === 0 && (
               <tr>
-                <td colSpan={12} className="px-3 py-6 text-center font-mono text-xs" style={{ color: "var(--text-dim)" }}>
+                <td colSpan={13} className="px-3 py-6 text-center font-mono text-xs" style={{ color: "var(--text-dim)" }}>
                   No candidates match the current filters.
                 </td>
               </tr>
