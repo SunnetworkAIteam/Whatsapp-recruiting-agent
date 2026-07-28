@@ -424,7 +424,7 @@ def handle_candidate_reply(message: TwilioInboundMessage) -> dict:
         else:
             sent_text = f"[{template_type.value} template sent]"
         meta_updates["conversation_history"] = (candidate.get("conversation_history") or []) + [
-            {"role": "assistant", "content": sent_text}
+            {"role": "assistant", "content": sent_text, "timestamp": now_ts.isoformat()}
         ]
 
         # Sync states safely through separate transition and explicit metadata updates
@@ -549,8 +549,9 @@ def handle_candidate_reply(message: TwilioInboundMessage) -> dict:
     # opening questions every single message, ignoring anything the
     # candidate already said.
     updated_history = list(conversation_history or [])
-    updated_history.append({"role": "user", "content": message.body})
-    updated_history.append({"role": "assistant", "content": result.reply})
+    _turn_ts = datetime.now(timezone.utc).isoformat()
+    updated_history.append({"role": "user", "content": message.body, "timestamp": _turn_ts})
+    updated_history.append({"role": "assistant", "content": result.reply, "timestamp": _turn_ts})
     update_candidate_metadata(candidate_id, {"conversation_history": updated_history})
 
     # Complete state transition. Disallowed transitions (e.g. a
