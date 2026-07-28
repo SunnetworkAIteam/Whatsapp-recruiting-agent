@@ -1043,6 +1043,16 @@ function OverviewView({ candidates }) {
           onClick={() => setSelectedStat(selectedStat === "total" ? null : "total")}
         />
         <StatCard
+          label="Delivered" value={candidates.filter((c) => c.first_outreach_sent_at && c.platform !== "no_whatsapp").length} sublabel="successfully reached" color="#16A34A"
+          active={selectedStat === "delivered"}
+          onClick={() => setSelectedStat(selectedStat === "delivered" ? null : "delivered")}
+        />
+        <StatCard
+          label="Blocked" value={candidates.filter((c) => c.platform === "no_whatsapp").length} sublabel="Meta/delivery issue" color="#FB5D74"
+          active={selectedStat === "blocked"}
+          onClick={() => setSelectedStat(selectedStat === "blocked" ? null : "blocked")}
+        />
+        <StatCard
           label="Awaiting first reply" value={stats.stillAtOutreachOnly} sublabel="sent outreach, no response yet" color="#4C8DFF"
           active={selectedStat === "outreach"}
           onClick={() => setSelectedStat(selectedStat === "outreach" ? null : "outreach")}
@@ -1075,6 +1085,8 @@ function OverviewView({ candidates }) {
           // card should always expand to exactly what its own number
           // represents.
           total: () => true,
+          delivered: (c) => c.first_outreach_sent_at && c.platform !== "no_whatsapp",
+          blocked: (c) => c.platform === "no_whatsapp",
           outreach: (c) => c.status === "messaged",
           followup1: (c) => c.followup_1_sent_at,
           followup2: (c) => c.followup_2_sent_at,
@@ -1257,6 +1269,7 @@ function OverviewView({ candidates }) {
           </tbody>
         </table>
       </div>
+
     </div>
   );
 }
@@ -1270,16 +1283,24 @@ function OverviewView({ candidates }) {
 // such candidates once that detection is added (e.g. a WhatsApp-existence
 // check during Sheets ingestion); until then, this list will stay empty.
 // ---------------------------------------------------------------------------
+// Error codes considered "likely recoverable" once Meta Business
+// Verification (or quality rating) improves -- these candidates get
+// their own separate "Delivery Blocked" tab, since retrying them later
+// often succeeds, unlike a genuinely invalid WhatsApp number.
+const RECOVERABLE_ERROR_CODES = ["63049", "63032"];
+
 function NoWhatsappView({ candidates, onOpenCandidate }) {
   // Exclude anyone genuinely engaged (replied, qualified, escalated,
-  // etc.) even if platform === "no_whatsapp" -- that flag only means
-  // ONE specific template send failed (e.g. a follow-up template still
-  // categorized as Marketing and blocked by Meta), not that the person
-  // is unreachable on WhatsApp entirely. Someone actively mid-conversation
-  // clearly CAN be reached, so showing them in a tab literally called
-  // "No WhatsApp" was misleading.
+  // etc.) even if platform === "no_whatsapp", AND exclude anyone whose
+  // error code is likely recoverable (see DeliveryBlockedView below) --
+  // this tab is now specifically for candidates who genuinely don't
+  // have WhatsApp on that number at all, not ones just temporarily
+  // throttled by Meta.
   const noWhatsapp = candidates.filter(
-    (c) => c.platform !== "whatsapp" && !ENGAGED_STATUSES.has(c.status)
+    (c) =>
+      c.platform !== "whatsapp" &&
+      !ENGAGED_STATUSES.has(c.status) &&
+      !RECOVERABLE_ERROR_CODES.includes(c.delivery_error_code)
   );
 
   return (
@@ -1288,8 +1309,9 @@ function NoWhatsappView({ candidates, onOpenCandidate }) {
         className="mb-4 rounded-xl p-4 font-mono text-xs"
         style={{ background: "var(--surface)", border: "1px solid var(--line)", color: "var(--text-dim)" }}
       >
-        Candidates who couldn't actually be reached on WhatsApp -- flagged automatically via Twilio's
-        delivery status callbacks (or manually, for known account/template-level delivery blocks).
+        Candidates who genuinely don't have WhatsApp on that number. For candidates temporarily
+        blocked by a Meta-side delivery restriction (likely to resolve on its own), see the
+        "Delivery Blocked" tab instead.
       </div>
 
       {noWhatsapp.length === 0 ? (
@@ -1323,6 +1345,61 @@ function NoWhatsappView({ candidates, onOpenCandidate }) {
   );
 }
 
+function DeliveryBlockedView({ candidates, onOpenCandidate }) {
+  // Candidates blocked by a likely-recoverable Meta-side delivery
+  // restriction (see RECOVERABLE_ERROR_CODES above) -- separate from
+  // "No WhatsApp" since these often succeed on retry once Business
+  // Verification (or quality rating) improves, unlike a genuinely
+  // invalid WhatsApp number.
+  const blocked = candidates.filter(
+    (c) =>
+      c.platform === "no_whatsapp" &&
+      !ENGAGED_STATUSES.has(c.status) &&
+      RECOVERABLE_ERROR_CODES.includes(c.delivery_error_code)
+  );
+
+  return (
+    <div>
+      <div
+        className="mb-4 rounded-xl p-4 font-mono text-xs"
+        style={{ background: "var(--surface)", border: "1px solid var(--line)", color: "var(--text-dim)" }}
+      >
+        Candidates temporarily blocked by a Meta-side delivery restriction (often tied to Business
+        Verification status). These are automatically retried daily, and usually succeed once the
+        underlying restriction clears -- they are NOT necessarily unreachable.
+      </div>
+
+      {blocked.length === 0 ? (
+        <div
+          className="flex items-center justify-center rounded-xl py-12 font-mono text-sm"
+          style={{ background: "var(--surface)", border: "1px solid var(--line)", color: "var(--text-dim)" }}
+        >
+          — no blocked candidates right now —
+        </div>
+      ) : (
+        <div className="space-y-2">
+          {blocked.map((c) => (
+            <button
+              key={c.id}
+              onClick={() => onOpenCandidate(c)}
+              className="block w-full rounded-xl p-3 text-left transition-colors hover:bg-white/5"
+              style={{ background: "var(--surface)", border: "1px solid var(--line)" }}
+            >
+              <div className="flex items-center justify-between gap-2">
+                <span className="font-medium" style={{ color: "var(--text-hi)" }}>{c.name}</span>
+                <span className="font-mono text-[11px]" style={{ color: "var(--text-dim)" }}>
+                  error {c.delivery_error_code}
+                </span>
+              </div>
+              <div className="mt-0.5 text-sm" style={{ color: "var(--text-mid)" }}>{c.role} · {c.phone}</div>
+            </button>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+// ---------------------------------------------------------------------------
 // ---------------------------------------------------------------------------
 // MESSAGES VIEW -- list of candidates with any conversation activity, and
 // a WhatsApp-style transcript of their full conversation_history when
@@ -2452,6 +2529,7 @@ const TABS = [
   { key: "recruiters", label: "By recruiter", icon: UserCog },
   { key: "messages", label: "Messages", icon: MessageSquareText },
   { key: "no-whatsapp", label: "No WhatsApp", icon: PhoneOff },
+  { key: "delivery-blocked", label: "Delivery Blocked", icon: PhoneOff },
   { key: "add", label: "Add candidates", icon: UserPlus },
   { key: "screening", label: "Screening Details" },
   { key: "settings", label: "Role & Messaging Setup" },
@@ -2637,6 +2715,9 @@ export default function CandidatePipelineBoard() {
       )}
       {tab === "no-whatsapp" && (
         <NoWhatsappView candidates={candidates} onOpenCandidate={(c) => setSelectedId(c.id)} />
+      )}
+      {tab === "delivery-blocked" && (
+        <DeliveryBlockedView candidates={candidates} onOpenCandidate={(c) => setSelectedId(c.id)} />
       )}
       {tab === "add" && <AddCandidatesView addCandidates={addCandidates} />}
       {tab === "screening" && <ScreeningDetailsView candidates={candidates} />}

@@ -20,6 +20,53 @@ if SUPABASE_URL and SUPABASE_KEY:
 SEND_STAGGER_SECONDS = 2
 
 
+# Error codes considered recoverable for the retry logic below --
+# 63024 (genuinely not a WhatsApp number) is deliberately excluded,
+# since retrying it can never succeed.
+RECOVERABLE_NO_WHATSAPP_ERROR_CODES = ["63049", "63032"]
+
+
+def retry_recoverable_no_whatsapp_candidates() -> int:
+    """
+    Resets any candidate flagged "no_whatsapp" with a recoverable error
+    code (Meta-side throttling, not a genuinely invalid number) back to
+    "pending", then enqueues them with the normal staggered send.
+
+    Shared by both scripts/retry_recoverable_no_whatsapp.py (manual,
+    on-demand use) and app.retry_no_whatsapp_task (automatic daily
+    Celery Beat run) -- kept here, not duplicated in each, so both
+    always stay in sync.
+
+    Returns the number of candidates reset and retried.
+    """
+    global supabase
+    if supabase is None:
+        raise RuntimeError("Supabase not configured.")
+
+    result = (
+        supabase.table("candidates")
+        .select("id")
+        .eq("platform", "no_whatsapp")
+        .in_("delivery_error_code", RECOVERABLE_NO_WHATSAPP_ERROR_CODES)
+        .execute()
+    )
+    candidates = result.data or []
+    if not candidates:
+        return 0
+
+    for r in candidates:
+        supabase.table("candidates").update({
+            "status": "pending",
+            "platform": "whatsapp",
+            "delivery_error_code": None,
+            "delivery_error_message": None,
+            "delivery_status": None,
+        }).eq("id", r["id"]).execute()
+
+    enqueue_pending_candidates()
+    return len(candidates)
+
+
 def enqueue_pending_candidates():
     global supabase
     if supabase is None:

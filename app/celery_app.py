@@ -9,7 +9,7 @@ celery_app = Celery(
     "candidate_worker",
     broker=REDIS_URL,
     backend=REDIS_URL,
-    include=["agent.followup_scheduler_task", "app.tasks", "app.enqueue_task"],
+    include=["agent.followup_scheduler_task", "app.tasks", "app.enqueue_task", "app.retry_no_whatsapp_task"],
 )
 
 # Rate limit: max 10 tasks per minute
@@ -39,6 +39,16 @@ celery_app.conf.beat_schedule = {
     "run-followup-cycle": {
         "task": "agent.followup_scheduler_task.run_followup_cycle_task",
         "schedule": crontab(minute="*/5"),
+    },
+    # Real problem this solves: candidates blocked by a recoverable
+    # Meta-side error (e.g. 63049, tied to Business Verification status
+    # still being in progress) previously stayed stuck until someone
+    # remembered to manually run scripts/retry_recoverable_no_whatsapp.py.
+    # Running this once a day means recovery happens automatically, with
+    # no manual intervention needed.
+    "retry-recoverable-no-whatsapp": {
+        "task": "app.retry_no_whatsapp_task.retry_recoverable_no_whatsapp_task",
+        "schedule": crontab(hour=6, minute=0),  # once daily, 6 AM UTC (11:30 AM IST)
     },
 }
 celery_app.conf.timezone = "UTC"
