@@ -43,10 +43,10 @@ class TestRowsToRecords:
     def test_header_only_returns_empty_list(self):
         assert rows_to_records([["name", "phone", "role"]], "NOC") == []
 
-    def test_basic_row_is_converted_to_dict_with_role(self):
+    def test_basic_row_without_a_role_column_uses_sheet_name(self):
         rows = [
-            ["name", "phone", "role"],
-            ["Priya", "9876543210", "Backend"],
+            ["name", "phone"],
+            ["Priya", "9876543210"],
         ]
         records = rows_to_records(rows, "NOC")
         assert records == [{"name": "Priya", "phone": "9876543210", "role": "NOC"}]
@@ -91,12 +91,26 @@ class TestRowsToRecords:
         records = rows_to_records(rows, "NOC")
         assert records[0]["phone"] == "9876543210"
 
-    def test_role_is_set_from_argument_not_from_sheet(self):
-        # The sheet name (passed in as `role`) is authoritative, even if
-        # a "role" column happens to exist with different content.
+    def test_per_row_role_column_takes_priority_over_sheet_name(self):
+        # Real feature this enables: a single global sheet listing every
+        # role together (with its own "Role" column per row), instead of
+        # one sheet per role -- HR can use either approach. If the sheet
+        # itself has a real role value for a row, that wins over the
+        # sheet's own name.
         rows = [
             ["name", "phone", "role"],
             ["Priya", "9876543210", "SomethingElse"],
+        ]
+        records = rows_to_records(rows, "NOC")
+        assert records[0]["role"] == "SomethingElse"
+
+    def test_blank_role_column_falls_back_to_sheet_name(self):
+        # A per-role sheet might still happen to have an empty "role"
+        # column -- an actually-blank value should NOT override the
+        # sheet name fallback.
+        rows = [
+            ["name", "phone", "role"],
+            ["Priya", "9876543210", ""],
         ]
         records = rows_to_records(rows, "NOC")
         assert records[0]["role"] == "NOC"
