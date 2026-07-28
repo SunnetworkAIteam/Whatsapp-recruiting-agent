@@ -1330,6 +1330,12 @@ function NoWhatsappView({ candidates, onOpenCandidate }) {
 // ---------------------------------------------------------------------------
 function ChatBubble({ turn }) {
   const isUser = turn.role === "user";
+  // Older messages (sent before timestamps were added to
+  // conversation_history) simply won't have one -- gracefully show
+  // nothing rather than a broken/blank time in that case.
+  const timeLabel = turn.timestamp
+    ? new Date(turn.timestamp).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })
+    : null;
   return (
     <div className={`flex ${isUser ? "justify-start" : "justify-end"}`}>
       <div
@@ -1340,8 +1346,24 @@ function ChatBubble({ turn }) {
             : { background: hexToRgba("#0891B2", 0.16), color: "var(--text-hi)", borderTopRightRadius: 4 }
         }
       >
-        {turn.content}
+        <div>{turn.content}</div>
+        {timeLabel && (
+          <div className="mt-1 text-right font-mono text-[10px] opacity-60">{timeLabel}</div>
+        )}
       </div>
+    </div>
+  );
+}
+
+function DateSeparator({ label }) {
+  return (
+    <div className="my-2 flex items-center justify-center">
+      <span
+        className="rounded-full px-2.5 py-0.5 font-mono text-[10px] uppercase tracking-wide"
+        style={{ background: "var(--surface-hover)", color: "var(--text-dim)" }}
+      >
+        {label}
+      </span>
     </div>
   );
 }
@@ -1520,9 +1542,18 @@ function MessagesView({ candidates, onOpenCandidate }) {
               </div>
             </button>
             <div className="thin-scroll flex-1 space-y-2 overflow-y-auto p-4">
-              {selected.conversation_history.map((turn, i) => (
-                <ChatBubble key={i} turn={turn} />
-              ))}
+              {selected.conversation_history.map((turn, i) => {
+                const prevTurn = selected.conversation_history[i - 1];
+                const currentDay = turn.timestamp ? new Date(turn.timestamp).toDateString() : null;
+                const prevDay = prevTurn?.timestamp ? new Date(prevTurn.timestamp).toDateString() : null;
+                const showDateSeparator = currentDay && currentDay !== prevDay;
+                return (
+                  <React.Fragment key={i}>
+                    {showDateSeparator && <DateSeparator label={new Date(turn.timestamp).toLocaleDateString([], { day: "numeric", month: "short", year: "numeric" })} />}
+                    <ChatBubble turn={turn} />
+                  </React.Fragment>
+                );
+              })}
             </div>
             <div className="border-t p-3" style={{ borderColor: "var(--line)" }}>
               {sendError && (
