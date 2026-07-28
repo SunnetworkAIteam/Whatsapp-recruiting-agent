@@ -292,7 +292,7 @@ def append_conversation_turn(candidate_id: str, candidate: dict, role: str, cont
     who'd only received outbound messages but hadn't replied yet was
     completely invisible in the dashboard's Messages tab.
     """
-    history = (candidate.get("conversation_history") or []) + [{"role": role, "content": content}]
+    history = (candidate.get("conversation_history") or []) + [{"role": role, "content": content, "timestamp": datetime.now(timezone.utc).isoformat()}]
     update_candidate_metadata(candidate_id, {"conversation_history": history})
     return history
 
@@ -358,21 +358,6 @@ def create_candidate_for_unknown_number(normalized_phone: str) -> dict:
         .execute()
     )
     return result.data[0]
-
-
-def append_conversation_turn(candidate_id: str, candidate: dict, role: str, content: str) -> list:
-    """
-    Append a single turn (role='user' or 'assistant') to a candidate's
-    conversation_history and persist it. Used both for LLM-generated
-    replies (already handled elsewhere) and for automated template
-    sends (initial outreach, follow-ups) -- those previously never
-    appeared in conversation_history at all, which meant any candidate
-    who'd only received outbound messages but hadn't replied yet was
-    completely invisible in the dashboard's Messages tab.
-    """
-    history = (candidate.get("conversation_history") or []) + [{"role": role, "content": content}]
-    update_candidate_metadata(candidate_id, {"conversation_history": history})
-    return history
 
 
 def record_unmatched_message(phone: str, body: str) -> None:

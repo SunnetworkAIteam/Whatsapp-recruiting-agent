@@ -150,7 +150,7 @@ def _record_followup_sent(candidate, candidate_id, timestamp_field, now_utc, lab
     presenting fabricated text as if it were the real message.
     """
     label_text = f"[{label} sent to {name or 'candidate'} for {role or 'this role'}]"
-    history = (candidate.get("conversation_history") or []) + [{"role": "assistant", "content": label_text}]
+    history = (candidate.get("conversation_history") or []) + [{"role": "assistant", "content": label_text, "timestamp": now_utc.isoformat()}]
     update_candidate_metadata(candidate_id, {timestamp_field: now_utc, "conversation_history": history})
 
 

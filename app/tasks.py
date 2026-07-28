@@ -89,7 +89,7 @@ def send_candidate(self, candidate_id: str):
         f"This is a {template_variables['3']} position with {template_variables['4']} working hours. "
         f"Please reply to this message to continue with your application. Thank you!"
     )
-    history = (candidate.get("conversation_history") or []) + [{"role": "assistant", "content": sent_text}]
+    history = (candidate.get("conversation_history") or []) + [{"role": "assistant", "content": sent_text, "timestamp": now_ts}]
 
     supabase.table("candidates").update({
         "status": "messaged",
