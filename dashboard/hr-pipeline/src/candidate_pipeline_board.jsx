@@ -1348,8 +1348,11 @@ function ChatBubble({ turn }) {
 
 function MessagesView({ candidates, onOpenCandidate }) {
   const [searchQuery, setSearchQuery] = useState("");
+  const [roleFilter, setRoleFilter] = useState("");
   const withMessages = candidates.filter((c) => c.conversation_history && c.conversation_history.length > 0);
+  const messageRoles = Array.from(new Set(withMessages.map((c) => c.role).filter(Boolean))).sort();
   const filteredMessages = withMessages.filter((c) => {
+    if (roleFilter && c.role !== roleFilter) return false;
     const q = searchQuery.trim().toLowerCase();
     if (!q) return true;
     return (c.name || "").toLowerCase().includes(q) || (c.phone || "").includes(q);
@@ -1417,7 +1420,7 @@ function MessagesView({ candidates, onOpenCandidate }) {
         className="flex w-72 shrink-0 flex-col overflow-hidden rounded-xl"
         style={{ background: "var(--surface)", border: "1px solid var(--line)" }}
       >
-        <div className="border-b p-2" style={{ borderColor: "var(--line)" }}>
+        <div className="space-y-2 border-b p-2" style={{ borderColor: "var(--line)" }}>
           <input
             value={searchQuery}
             onChange={(e) => setSearchQuery(e.target.value)}
@@ -1425,6 +1428,20 @@ function MessagesView({ candidates, onOpenCandidate }) {
             className={inputClass}
             style={inputStyle}
           />
+          <select
+            value={roleFilter}
+            onChange={(e) => setRoleFilter(e.target.value)}
+            className={inputClass}
+            style={inputStyle}
+          >
+            <option value="">All Roles ({withMessages.length})</option>
+            {messageRoles.map((r) => {
+              const count = withMessages.filter((c) => c.role === r).length;
+              return (
+                <option key={r} value={r}>{r} ({count})</option>
+              );
+            })}
+          </select>
         </div>
         <div className="thin-scroll flex-1 overflow-y-auto">
         {filteredMessages
