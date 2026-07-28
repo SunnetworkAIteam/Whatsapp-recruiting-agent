@@ -139,7 +139,15 @@ def rows_to_records(rows, role: str):
         if not any(str(v).strip() for v in record.values()):
             continue
 
-        record["role"] = role
+        # If the sheet itself already has a "role" column with a real
+        # value for this row (e.g. a single global sheet listing every
+        # role together, rather than one sheet per role), that per-row
+        # value is authoritative. Otherwise, fall back to the sheet's
+        # own name as the role -- the original per-role-sheet behavior,
+        # kept fully working side by side with the new global-sheet
+        # option, so HR can use either approach.
+        if not (record.get("role") or "").strip():
+            record["role"] = role
         records.append(record)
 
     return records
