@@ -361,7 +361,30 @@ function usePipelineData() {
     return true;
   }, []);
 
-  return { candidates, connection, lastSyncedAt, refresh: fetchAll, justMoved, addCandidates, markReviewed };
+
+  // Used by the Pipeline board's drag-and-drop -- deliberately calls
+  // supabase directly rather than the backend's transition_status()
+  // (which enforces ALLOWED_TRANSITIONS for the automated LLM/rule-engine
+  // flow only). This is a manual, HR-driven action, so moving between
+  // any two columns should be allowed, in either direction.
+  const moveCandidateStatus = useCallback(async (candidateId, newStatus) => {
+    const { data, error } = await supabase
+      .from("candidates")
+      .update({ status: newStatus })
+      .eq("id", candidateId)
+      .select();
+    if (error) {
+      // eslint-disable-next-line no-console
+      console.error("Failed to move candidate status:", error);
+      return;
+    }
+    if (data && data[0]) {
+      const mapped = mapRow(data[0]);
+      setCandidates((prev) => prev.map((c) => (c.id === candidateId ? mapped : c)));
+    }
+  }, []);
+
+  return { candidates, connection, lastSyncedAt, refresh: fetchAll, justMoved, addCandidates, markReviewed, moveCandidateStatus };
 }
 
 // ---------------------------------------------------------------------------
@@ -462,6 +485,11 @@ function CandidateCard({ candidate, highlighted, onOpen }) {
   return (
     <button
       type="button"
+      draggable="true"
+      onDragStart={(e) => {
+        e.dataTransfer.setData("text/plain", candidate.id);
+        e.dataTransfer.effectAllowed = "move";
+      }}
       onClick={() => onOpen(candidate)}
       style={{
         background: "var(--surface)",
@@ -470,6 +498,7 @@ function CandidateCard({ candidate, highlighted, onOpen }) {
         borderLeftWidth: "3px",
         "--glow-color": hexToRgba(status.color, 0.55),
         boxShadow: "0 1px 2px rgba(0,0,0,0.25)",
+        cursor: "grab",
       }}
       onMouseEnter={(e) => {
         e.currentTarget.style.boxShadow = `0 12px 28px -10px ${hexToRgba(status.color, 0.35)}, 0 4px 10px -4px rgba(0,0,0,0.5)`;
@@ -521,9 +550,10 @@ function CandidateCard({ candidate, highlighted, onOpen }) {
   );
 }
 
-function Column({ status, candidates, justMoved, onOpenCandidate }) {
+function Column({ status, candidates, justMoved, onOpenCandidate, onDropCandidate }) {
   const prevCountRef = useRef(candidates.length);
   const [pop, setPop] = useState(false);
+  const [dragOver, setDragOver] = useState(false);
 
   useEffect(() => {
     if (prevCountRef.current !== candidates.length) {
@@ -551,8 +581,22 @@ function Column({ status, candidates, justMoved, onOpenCandidate }) {
         </span>
       </div>
       <div
-        className="flex min-h-[120px] flex-1 flex-col gap-2 rounded-xl p-2"
-        style={{ background: "rgba(255,255,255,0.015)", border: "1px solid var(--line)" }}
+        onDragOver={(e) => {
+          e.preventDefault();
+          setDragOver(true);
+        }}
+        onDragLeave={() => setDragOver(false)}
+        onDrop={(e) => {
+          e.preventDefault();
+          setDragOver(false);
+          const candidateId = e.dataTransfer.getData("text/plain");
+          if (candidateId) onDropCandidate(candidateId, status.key);
+        }}
+        className="flex min-h-[120px] flex-1 flex-col gap-2 rounded-xl p-2 transition-colors duration-150"
+        style={{
+          background: dragOver ? hexToRgba(status.color, 0.1) : "rgba(255,255,255,0.015)",
+          border: dragOver ? `1px dashed ${status.color}` : "1px solid var(--line)",
+        }}
       >
         {candidates.length === 0 && (
           <div className="flex flex-1 items-center justify-center py-8 font-mono text-xs" style={{ color: "var(--text-dim)" }}>
@@ -721,11 +765,23 @@ function CandidateDetailModal({ candidate, onClose, onMarkReviewed }) {
 // ---------------------------------------------------------------------------
 // PIPELINE BOARD VIEW (columns by status)
 // ---------------------------------------------------------------------------
-function PipelineBoardView({ candidates, justMoved, onOpenCandidate }) {
+function PipelineBoardView({ candidates, justMoved, onOpenCandidate, moveCandidateStatus }) {
   const byStatus = STATUS_KEYS.reduce((acc, key) => {
     acc[key] = candidates.filter((c) => c.status === key);
     return acc;
   }, {});
+
+  // Drag-and-drop moves a candidate's status directly via Supabase --
+  // deliberately NOT going through the backend's transition_status()
+  // (which enforces ALLOWED_TRANSITIONS for the automated LLM/rule-engine
+  // flow). This is a manual, HR-driven action, so any column-to-column
+  // move should be allowed, in either direction, without those
+  // automated-flow restrictions applying.
+  const onDropCandidate = (candidateId, newStatus) => {
+    const candidate = candidates.find((c) => c.id === candidateId);
+    if (!candidate || candidate.status === newStatus) return;
+    moveCandidateStatus(candidateId, newStatus);
+  };
 
   return (
     <div className="thin-scroll flex gap-4 overflow-x-auto pb-3">
@@ -736,6 +792,7 @@ function PipelineBoardView({ candidates, justMoved, onOpenCandidate }) {
           candidates={byStatus[status.key]}
           justMoved={justMoved}
           onOpenCandidate={onOpenCandidate}
+          onDropCandidate={onDropCandidate}
         />
       ))}
     </div>
@@ -2094,6 +2151,70 @@ function SettingsView({ candidates }) {
     }));
   };
 
+  const [renamingRole, setRenamingRole] = useState(null);
+  const [renameInput, setRenameInput] = useState("");
+  const [deletingRole, setDeletingRole] = useState(null);
+
+  const startRename = (role) => {
+    setRenamingRole(role);
+    setRenameInput(role);
+  };
+
+  const confirmRename = async (oldRole) => {
+    const newRole = renameInput.trim();
+    if (!newRole || newRole === oldRole) {
+      setRenamingRole(null);
+      return;
+    }
+    if (details[newRole] !== undefined) {
+      window.alert(`"${newRole}" already exists -- pick a different name.`);
+      return;
+    }
+    const row = details[oldRole] || blankRoleDetails;
+
+    // Insert the new role's config first, then remove the old one, then
+    // update every existing candidate tagged with the old role name --
+    // otherwise they'd silently lose their configured details (falling
+    // back to "TBD") even though nothing about their actual role changed,
+    // just its name.
+    await supabase.from("role_work_details").upsert({
+      role: newRole,
+      work_type: row.work_type,
+      hours: row.hours,
+      job_description: row.job_description,
+      company_name: row.company_name,
+      company_website: row.company_website,
+      mandatory_questions: row.mandatory_questions,
+      optional_questions: row.optional_questions,
+      updated_at: new Date().toISOString(),
+    });
+    await supabase.from("role_work_details").delete().eq("role", oldRole);
+    await supabase.from("candidates").update({ role: newRole }).eq("role", oldRole);
+
+    setDetails((prev) => {
+      const next = { ...prev };
+      delete next[oldRole];
+      next[newRole] = row;
+      return next;
+    });
+    setRenamingRole(null);
+  };
+
+  const deleteRole = async (role) => {
+    const confirmed = window.confirm(
+      `Delete "${role}"'s configuration? This only removes the Work Type/Hours/JD/questions setup for this role -- any candidates tagged with it are NOT affected or deleted, they'll just show as unconfigured again.`
+    );
+    if (!confirmed) return;
+    setDeletingRole(role);
+    await supabase.from("role_work_details").delete().eq("role", role);
+    setDeletingRole(null);
+    setDetails((prev) => {
+      const next = { ...prev };
+      delete next[role];
+      return next;
+    });
+  };
+
   const saveRole = async (role) => {
     setSaving((prev) => ({ ...prev, [role]: true }));
     const row = details[role] || blankRoleDetails;
@@ -2261,7 +2382,51 @@ function SettingsView({ candidates }) {
           return (
             <div key={role} className="rounded-xl p-4" style={{ background: "var(--surface)", border: "1px solid var(--line)" }}>
               <div className="flex items-center justify-between gap-3">
-                <div className="font-display text-sm font-semibold" style={{ color: "var(--text-hi)" }}>{role}</div>
+                {renamingRole === role ? (
+                  <div className="flex flex-1 items-center gap-2">
+                    <input
+                      value={renameInput}
+                      onChange={(e) => setRenameInput(e.target.value)}
+                      onKeyDown={(e) => e.key === "Enter" && confirmRename(role)}
+                      autoFocus
+                      className={inputClass}
+                      style={{ ...inputStyle, maxWidth: "220px" }}
+                    />
+                    <button
+                      onClick={() => confirmRename(role)}
+                      className="rounded-md px-2 py-1 text-xs font-medium"
+                      style={{ background: "#16A34A", color: "#ffffff" }}
+                    >
+                      Confirm
+                    </button>
+                    <button
+                      onClick={() => setRenamingRole(null)}
+                      className="text-xs"
+                      style={{ color: "var(--text-dim)" }}
+                    >
+                      Cancel
+                    </button>
+                  </div>
+                ) : (
+                  <div className="flex items-center gap-2">
+                    <div className="font-display text-sm font-semibold" style={{ color: "var(--text-hi)" }}>{role}</div>
+                    <button
+                      onClick={() => startRename(role)}
+                      className="font-mono text-[11px] transition-colors hover:opacity-80"
+                      style={{ color: "var(--text-dim)" }}
+                    >
+                      Rename
+                    </button>
+                    <button
+                      onClick={() => deleteRole(role)}
+                      disabled={deletingRole === role}
+                      className="font-mono text-[11px] transition-colors hover:opacity-80 disabled:opacity-50"
+                      style={{ color: "#FB5D74" }}
+                    >
+                      {deletingRole === role ? "Deleting..." : "Delete"}
+                    </button>
+                  </div>
+                )}
                 <button
                   onClick={() => saveRole(role)}
                   disabled={saving[role]}
@@ -2536,7 +2701,7 @@ const TABS = [
 ];
 
 export default function CandidatePipelineBoard() {
-  const { candidates, connection, lastSyncedAt, refresh, justMoved, addCandidates, markReviewed } = usePipelineData();
+  const { candidates, connection, lastSyncedAt, refresh, justMoved, addCandidates, markReviewed, moveCandidateStatus } = usePipelineData();
   const [selectedId, setSelectedId] = useState(null);
   const [tab, setTab] = useState("overview");
   const [clock, setClock] = useState(new Date());
@@ -2702,7 +2867,7 @@ export default function CandidatePipelineBoard() {
       <div key={tab} className="fade-slide-in">
       {tab === "overview" && <OverviewView candidates={candidates} />}
       {tab === "pipeline" && (
-        <PipelineBoardView candidates={candidates} justMoved={justMoved} onOpenCandidate={(c) => setSelectedId(c.id)} />
+        <PipelineBoardView candidates={candidates} justMoved={justMoved} onOpenCandidate={(c) => setSelectedId(c.id)} moveCandidateStatus={moveCandidateStatus} />
       )}
       {tab === "roles" && (
         <RoleSummaryView candidates={candidates} onOpenCandidate={(c) => setSelectedId(c.id)} />
